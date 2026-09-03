@@ -1,0 +1,19 @@
+{
+  "apps": [
+    {
+      "name": "Calculator",
+      "path": "/System/Applications/Calculator.app",
+      "icon_path": "/Users/Marcy_Student/Development/side-project/Virtual-Launcher/assets/app_icons/Calculator_app_b47e48fce0.png"
+    },
+    {
+      "name": "Slack",
+      "path": "/Applications/Slack.app",
+      "icon_path": "/Users/Marcy_Student/Development/side-project/Virtual-Launcher/assets/app_icons/Slack_app_157a85049f.png"
+    },
+    {
+      "name": "Calendar",
+      "path": "/System/Applications/Calendar.app",
+      "icon_path": null
+    }
+  ]
+}

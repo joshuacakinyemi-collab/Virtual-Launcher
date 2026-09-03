@@ -1,7 +1,7 @@
 {
-  "background_sound": null,
-  "recent_sounds": [],
-  "muted": false,
-  "theme_color": "#1e8f1c",
-  "background_style": "rings"
+  "theme_color": "#51ce44",
+  "custom_colors": {
+    "glow": "#259058",
+    "tile": "#007440"
+  }
 }
