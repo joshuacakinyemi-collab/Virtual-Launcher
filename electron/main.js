@@ -209,7 +209,13 @@ function defaultAppDir() {
 }
 
 function extractAppIcon(appPath) {
-  if (process.platform !== 'darwin' || !appPath.endsWith('.app')) return null;
+  if (process.platform === 'darwin') return extractAppIconMac(appPath);
+  if (process.platform === 'win32') return extractAppIconWindows(appPath);
+  return null;
+}
+
+function extractAppIconMac(appPath) {
+  if (!appPath.endsWith('.app')) return null;
 
   const resourcesDir = path.join(appPath, 'Contents', 'Resources');
   const plistPath = path.join(appPath, 'Contents', 'Info.plist');
@@ -241,6 +247,34 @@ function extractAppIcon(appPath) {
   const destPath = path.join(iconCacheDir(), `${slugFor(appPath)}.png`);
   try {
     execFileSync('sips', ['-s', 'format', 'png', icnsPath, '--out', destPath], { stdio: 'ignore' });
+  } catch {
+    return null;
+  }
+  return fs.existsSync(destPath) ? destPath : null;
+}
+
+// Windows .exe icons are a PE resource embedded in the file itself — no
+// bundle/plist step like macOS needs, but there's still no plain file read
+// that returns it as an image; it has to go through a Windows API. Rather
+// than adding a native dependency, this shells out to PowerShell (present
+// on every supported Windows version) via .NET's System.Drawing, the same
+// way the mac path shells out to sips/plutil instead of a native binding.
+function extractAppIconWindows(exePath) {
+  if (!exePath.toLowerCase().endsWith('.exe')) return null;
+
+  fs.mkdirSync(iconCacheDir(), { recursive: true });
+  const destPath = path.join(iconCacheDir(), `${slugFor(exePath)}.png`);
+  const psEscape = (s) => s.replace(/'/g, "''");
+  const script = [
+    'Add-Type -AssemblyName System.Drawing',
+    `$icon = [System.Drawing.Icon]::ExtractAssociatedIcon('${psEscape(exePath)}')`,
+    'if ($null -eq $icon) { exit 1 }',
+    '$bitmap = $icon.ToBitmap()',
+    `$bitmap.Save('${psEscape(destPath)}', [System.Drawing.Imaging.ImageFormat]::Png)`,
+  ].join('; ');
+
+  try {
+    execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: 'ignore' });
   } catch {
     return null;
   }
