@@ -285,7 +285,7 @@ class ConsoleLauncher:
 
         self._place_window(self.window_w, self.window_h)
 
-        icon_path = os.path.join(BASE_DIR, 'pictures', 'inkling.png')
+        icon_path = os.path.join(BASE_DIR, 'pictures', 'app_icon.png')
         if os.path.exists(icon_path):
             self.icon_image = tk.PhotoImage(file=icon_path)
             self.root.iconphoto(False, self.icon_image)

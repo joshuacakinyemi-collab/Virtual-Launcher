@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p electron/assets electron/build)",
+      "Bash(cp assets/ps4_plus.png electron/assets/ps4_plus.png)",
+      "Bash(cp pictures/app_icon.png electron/build/icon.png)",
+      "Bash(cp \"/private/tmp/claude-502/-Users-Marcy-Student-Development-side-project-Virtual-Launcher/3f768911-7acd-4ac6-9094-08b9c5dcda94/scratchpad/AppIcon.icns\" electron/build/icon.icns)",
+      "Bash(npm install *)",
+      "Bash(npx electron-builder *)"
+    ]
+  }
+}

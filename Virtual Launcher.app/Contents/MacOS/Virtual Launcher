@@ -1,0 +1,16 @@
+#!/bin/bash
+# Double-click launcher for the Electron app in this checkout. This is a
+# thin wrapper around `npm start`, not a portable/relocatable build — it
+# runs the local electron/ install in place via the already-installed
+# Electron binary, so it only works from inside this repo. For a real
+# standalone distributable (one that runs without the source checkout),
+# electron-builder would be a separate, bigger step (main.js currently
+# resolves apps.json/settings.json/assets relative to the repo root, which
+# breaks once code is bundled into a relocatable .app).
+set -e
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+cd "$DIR/electron"
+if [ ! -d node_modules/electron ]; then
+  npm install
+fi
+exec ./node_modules/.bin/electron .

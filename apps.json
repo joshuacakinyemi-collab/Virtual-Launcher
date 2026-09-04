@@ -3,17 +3,38 @@
     {
       "name": "Calculator",
       "path": "/System/Applications/Calculator.app",
-      "icon_path": "/Users/Marcy_Student/Development/side-project/Virtual-Launcher/assets/app_icons/Calculator_app_b47e48fce0.png"
+      "icon_path": "/Users/Marcy_Student/Development/side-project/Virtual-Launcher/assets/app_icons/Calculator_app_b47e48fce0.png",
+      "banner_path": null,
+      "description": "",
+      "tags": [],
+      "playtime_seconds": 0
     },
     {
       "name": "Slack",
       "path": "/Applications/Slack.app",
-      "icon_path": "/Users/Marcy_Student/Development/side-project/Virtual-Launcher/assets/app_icons/Slack_app_157a85049f.png"
+      "icon_path": "/Users/Marcy_Student/Development/side-project/Virtual-Launcher/assets/app_icons/Slack_app_157a85049f.png",
+      "banner_path": null,
+      "description": "",
+      "tags": [],
+      "playtime_seconds": 0
     },
     {
       "name": "Calendar",
       "path": "/System/Applications/Calendar.app",
-      "icon_path": null
+      "icon_path": null,
+      "banner_path": null,
+      "description": "",
+      "tags": [],
+      "playtime_seconds": 0
+    },
+    {
+      "name": "Chess",
+      "path": "/System/Applications/Chess.app",
+      "icon_path": "/Users/Marcy_Student/Development/side-project/Virtual-Launcher/assets/app_icons/Chess_app_953ca567c5.png",
+      "banner_path": null,
+      "description": "",
+      "tags": [],
+      "playtime_seconds": 0
     }
   ]
 }

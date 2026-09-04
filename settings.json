@@ -1,7 +1,12 @@
 {
-  "theme_color": "#51ce44",
+  "theme_color": "#21965c",
   "custom_colors": {
-    "glow": "#259058",
-    "tile": "#007440"
-  }
+    "glow": "#25ff58",
+    "tile": "#006440"
+  },
+  "font_path": null,
+  "font_family": null,
+  "font_size": "medium",
+  "timezone": null,
+  "time_format": "12h"
 }
