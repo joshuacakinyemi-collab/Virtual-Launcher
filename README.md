@@ -14,12 +14,12 @@ There are two versions in this repo:
 
 ## Running it
 
-**Double-click `Virtual Launcher.app`** at the repo root. It's a thin
-launcher script (not a portable/standalone build — see [Files](#files)),
-so it only works from inside this checkout, but it means you don't need a
-terminal open every time.
+**Just want to run the app? Grab a prebuilt copy from [`Download/`](Download/)**
+— pick the file for your OS and see [Installing a prebuilt copy](#installing-a-prebuilt-copy)
+below. Those are real, self-contained installs; nothing else in this repo is
+required.
 
-Or from a terminal:
+**Working on the code?** Run it from source instead:
 
 ```
 cd electron
@@ -33,6 +33,26 @@ The legacy Python version still runs standalone with no dependencies:
 python3 console_launcher.py
 ```
 
+## Installing a prebuilt copy
+
+[`Download/`](Download/) has one file per platform:
+
+| File | What it is |
+|---|---|
+| `Virtual Launcher (macOS, Apple Silicon).dmg` | **Mac install.** Double-click, then drag the app onto the Applications shortcut in the window that opens. |
+| `Virtual Launcher (macOS, Apple Silicon).zip` | Same app, zipped instead — unzip it and drag it into `/Applications` yourself. |
+| `Virtual Launcher Setup (Windows installer).exe` | **Windows install.** Double-click, it installs to Program Files with a Start Menu shortcut. |
+| `Virtual Launcher (Windows portable).exe` | No install — double-click and it just runs, from anywhere (a USB stick, the Desktop, wherever). |
+
+These are unsigned builds (no Apple Developer certificate / no Windows code-signing
+cert), so the first launch will be blocked by the OS until you tell it that's fine:
+
+- **macOS**: a plain double-click only offers "Move to Trash." Instead,
+  **right-click (or Control-click) the app → Open → Open** in the dialog.
+  After that once, it opens normally forever after.
+- **Windows**: SmartScreen shows an "unrecognized publisher" warning →
+  **More info → Run anyway**.
+
 ## What it does
 
 - **Games sidebar** — every added game, icon + name, always visible on the
@@ -42,8 +62,8 @@ python3 console_launcher.py
   and records how long it was open; no manual bookkeeping.
 - **Settings** — a wrapping grid, reached via the sidebar's own **Settings**
   entry:
-  - **Add Game** — pick any app/executable via a file browser. On macOS its
-    real icon is extracted automatically; optionally search
+  - **Add Game** — pick any app/executable via a file browser. On macOS and
+    Windows its real icon is extracted automatically; optionally search
     [SteamGridDB](https://www.steamgriddb.com) for cover art instead.
   - **Remove Game**
   - **Update Game** — edit name/description/tags, and change its icon or
@@ -89,17 +109,22 @@ there's no on-screen keyboard.
 ```
 cd electron
 npm run dist:mac    # -> electron/dist/*.dmg, *.zip
-npm run dist:win    # -> electron/dist/*.exe (nsis installer + portable)
+npm run dist:win    # -> electron/dist/*.exe (nsis installer + portable, x64)
 npm run dist:linux  # -> electron/dist/*.AppImage, *.deb
 ```
 
 This uses [electron-builder](https://www.electron.build) to produce a real,
-self-contained app for the target platform — unlike `Virtual Launcher.app`
-(the thin dev-checkout launcher above), the output of `npm run dist:*` runs
-on a machine with no copy of this repo. Builds are unsigned, so on another
-Mac, Gatekeeper will require a right-click → Open the first time (there's no
-Apple Developer certificate involved); on Windows, SmartScreen may show a
-similar unrecognized-publisher warning.
+self-contained app for the target platform — the output runs on a machine
+with no copy of this repo. `electron/build/` holds the source icons
+(`icon.icns` for mac, `icon.ico` for Windows, `icon.png` for Linux) that get
+embedded into each build; after building, copy whichever files you want to
+hand out into [`Download/`](Download/) (that folder is gitignored — it's a
+local drop point, not something the repo tracks).
+
+The Windows target is pinned to `x64` explicitly — left to its own defaults,
+electron-builder targets whatever architecture the *build machine* is
+running, so building on Apple Silicon would otherwise silently produce a
+Windows-on-ARM binary that won't run on a normal (x64) Windows PC.
 
 ## Where your data lives
 
@@ -124,8 +149,8 @@ repo-root originals, which just stay as a frozen snapshot from that point on.
 | Path | What it is |
 |---|---|
 | `electron/` | The current app — Electron main process (`main.js`), preload bridge, and the renderer (`renderer/`). |
-| `electron/assets/`, `electron/build/` | Bundled, read-only assets shipped with the app itself (icons, the app icon) — separate from `assets/` at the repo root, which the app no longer depends on. |
-| `Virtual Launcher.app` | Double-click launcher for this checkout (see [Running it](#running-it)). Runs `electron/` in place; not the same as a `dist:*` build. |
+| `electron/assets/`, `electron/build/` | Bundled, read-only assets shipped with the app itself (UI icons, the app icon in every format each platform's packager wants) — separate from `assets/` at the repo root, which the app no longer depends on. |
+| `Download/` | Prebuilt installers for end users — see [Installing a prebuilt copy](#installing-a-prebuilt-copy). Gitignored; regenerated from `electron/dist/` (see [Building a distributable](#building-a-distributable)). |
 | `console_launcher.py` | The original Python/Tkinter prototype. Independent of `electron/`. |
 | `apps.json`, `settings.json`, `user.json` | A one-time migration seed for first run (see [Where your data lives](#where-your-data-lives)) — no longer the live data after that. |
 | `assets/` | Used by `console_launcher.py` only; the Electron app has its own copy under `electron/assets/`. |
@@ -134,9 +159,11 @@ repo-root originals, which just stay as a frozen snapshot from that point on.
 
 ## Notes
 
-- Icon extraction (showing a real app icon on a tile) only works on macOS
-  today; other platforms fall back to a plain letter tile, or SteamGridDB
-  art if you set one.
+- Icon extraction (showing a real app icon on a tile) works on macOS
+  (`.icns` via `sips`/`plutil`) and Windows (pulling the icon straight out
+  of the `.exe` via a PowerShell one-liner). Linux falls back to a plain
+  letter tile, or SteamGridDB art if you set one — there's no single
+  cross-distro convention for it the way there is on the other two.
 - **SteamGridDB and SteamDB are unrelated services** — easy to conflate
   since the names are so close. This app only uses
   [SteamGridDB](https://www.steamgriddb.com) (a community art database with
