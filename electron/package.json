@@ -4,6 +4,11 @@
   "description": "Console-style game launcher (Electron rewrite)",
   "main": "main.js",
   "private": true,
+  "author": {
+    "name": "Joshua Akinyemi",
+    "email": "joshuacakinyemi@gmail.com"
+  },
+  "homepage": "https://github.com/joshuacakinyemi-collab/Virtual-Launcher",
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder",
@@ -45,8 +50,8 @@
     },
     "linux": {
       "target": [
-        "AppImage",
-        "deb"
+        { "target": "AppImage", "arch": ["x64", "arm64"] },
+        { "target": "deb", "arch": ["x64", "arm64"] }
       ],
       "category": "Game",
       "icon": "build/icon.png"

@@ -38,18 +38,16 @@
     return luminance(hex) > 0.6 ? dark : light;
   }
 
-  function computeTheme(baseHex, overrides) {
-    const theme = {
+  // Glow/tile are always derived from the one accent color, never set
+  // independently — that's what keeps every part of the theme visually
+  // consistent with whatever single color a user picks in Menu Color.
+  function computeTheme(baseHex) {
+    return {
       bg: darken(baseHex, 0.85),
-      glow: lighten(baseHex, 0.25),
-      tile: mix(baseHex, '#10141c', 0.75),
-      tileOverlay: mix(baseHex, '#10141c', 0.55),
+      glow: lighten(baseHex, 0.3),
+      tile: mix(baseHex, '#10141c', 0.68),
+      tileOverlay: mix(baseHex, '#10141c', 0.48),
     };
-    if (overrides) {
-      if (overrides.glow) theme.glow = overrides.glow;
-      if (overrides.tile) theme.tile = overrides.tile;
-    }
-    return theme;
   }
 
   global.Theme = { hexToRgb, rgbToHex, lighten, darken, mix, luminance, readableFg, computeTheme };

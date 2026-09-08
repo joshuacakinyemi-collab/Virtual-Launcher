@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('api', {
   chooseAppPath: () => ipcRenderer.invoke('choose-app-path'),
   chooseImagePath: () => ipcRenderer.invoke('choose-image-path'),
   chooseFontPath: () => ipcRenderer.invoke('choose-font-path'),
+  selectFont: (fileName) => ipcRenderer.invoke('select-font', fileName),
+  removeFont: (fileName) => ipcRenderer.invoke('remove-font', fileName),
   addApp: (payload) => ipcRenderer.invoke('add-app', payload),
   updateApp: (payload) => ipcRenderer.invoke('update-app', payload),
   removeApp: (slug) => ipcRenderer.invoke('remove-app', slug),

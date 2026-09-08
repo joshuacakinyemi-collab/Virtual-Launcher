@@ -14,10 +14,13 @@ There are two versions in this repo:
 
 ## Running it
 
-**Just want to run the app? Grab a prebuilt copy from [`Download/`](Download/)**
+**Just want to run the app?** Grab a prebuilt copy from the
+**[Releases page](https://github.com/joshuacakinyemi-collab/Virtual-Launcher/releases)**
 — pick the file for your OS and see [Installing a prebuilt copy](#installing-a-prebuilt-copy)
 below. Those are real, self-contained installs; nothing else in this repo is
-required.
+required. (`Download/` locally is just where freshly-built copies land before
+they get uploaded there — see [Building a distributable](#building-a-distributable) —
+it isn't part of the repo itself, so a plain clone won't have it.)
 
 **Working on the code?** Run it from source instead:
 
@@ -35,7 +38,8 @@ python3 console_launcher.py
 
 ## Installing a prebuilt copy
 
-[`Download/`](Download/) has one file per platform:
+The [Releases page](https://github.com/joshuacakinyemi-collab/Virtual-Launcher/releases)
+has one file per platform:
 
 | File | What it is |
 |---|---|
@@ -43,6 +47,10 @@ python3 console_launcher.py
 | `Virtual Launcher (macOS, Apple Silicon).zip` | Same app, zipped instead — unzip it and drag it into `/Applications` yourself. |
 | `Virtual Launcher Setup (Windows installer).exe` | **Windows install.** Double-click, it installs to Program Files with a Start Menu shortcut. |
 | `Virtual Launcher (Windows portable).exe` | No install — double-click and it just runs, from anywhere (a USB stick, the Desktop, wherever). |
+| `Virtual Launcher (Linux x64).AppImage` | Most Linux desktops (Intel/AMD). Make it executable (`chmod +x`) and double-click or run it — no install. |
+| `Virtual Launcher (Linux arm64).AppImage` | Same, for ARM-based Linux (Raspberry Pi and similar). |
+| `Virtual Launcher (Linux x64).deb` | Debian/Ubuntu install (Intel/AMD) — `sudo dpkg -i` or your package manager's installer. |
+| `Virtual Launcher (Linux arm64).deb` | Same, for ARM-based Debian/Ubuntu. |
 
 These are unsigned builds (no Apple Developer certificate / no Windows code-signing
 cert), so the first launch will be blocked by the OS until you tell it that's fine:
@@ -110,21 +118,28 @@ there's no on-screen keyboard.
 cd electron
 npm run dist:mac    # -> electron/dist/*.dmg, *.zip
 npm run dist:win    # -> electron/dist/*.exe (nsis installer + portable, x64)
-npm run dist:linux  # -> electron/dist/*.AppImage, *.deb
+npm run dist:linux  # -> electron/dist/*.AppImage, *.deb (x64 and arm64, regardless of host arch)
 ```
 
 This uses [electron-builder](https://www.electron.build) to produce a real,
 self-contained app for the target platform — the output runs on a machine
 with no copy of this repo. `electron/build/` holds the source icons
 (`icon.icns` for mac, `icon.ico` for Windows, `icon.png` for Linux) that get
-embedded into each build; after building, copy whichever files you want to
-hand out into [`Download/`](Download/) (that folder is gitignored — it's a
-local drop point, not something the repo tracks).
+embedded into each build.
 
 The Windows target is pinned to `x64` explicitly — left to its own defaults,
 electron-builder targets whatever architecture the *build machine* is
 running, so building on Apple Silicon would otherwise silently produce a
 Windows-on-ARM binary that won't run on a normal (x64) Windows PC.
+
+**Publishing a build:** copy whichever files you want to hand out from
+`electron/dist/` into [`Download/`](Download/) (a local staging spot —
+gitignored, not part of the repo itself), then upload them as binaries on a
+[GitHub Release](https://github.com/joshuacakinyemi-collab/Virtual-Launcher/releases/new).
+That's what actually makes them downloadable by anyone — unlike the repo's
+tracked files, Release assets live outside git history, so shipping a new
+80–100MB build never bloats a future clone. Committing the raw files to git
+instead (even un-gitignoring `Download/`) would do exactly that.
 
 ## Where your data lives
 
@@ -150,7 +165,7 @@ repo-root originals, which just stay as a frozen snapshot from that point on.
 |---|---|
 | `electron/` | The current app — Electron main process (`main.js`), preload bridge, and the renderer (`renderer/`). |
 | `electron/assets/`, `electron/build/` | Bundled, read-only assets shipped with the app itself (UI icons, the app icon in every format each platform's packager wants) — separate from `assets/` at the repo root, which the app no longer depends on. |
-| `Download/` | Prebuilt installers for end users — see [Installing a prebuilt copy](#installing-a-prebuilt-copy). Gitignored; regenerated from `electron/dist/` (see [Building a distributable](#building-a-distributable)). |
+| `Download/` | Local staging spot for build output before it's uploaded to a [GitHub Release](https://github.com/joshuacakinyemi-collab/Virtual-Launcher/releases) — that's where end users actually get it (see [Installing a prebuilt copy](#installing-a-prebuilt-copy)). Gitignored; not part of the repo itself. |
 | `console_launcher.py` | The original Python/Tkinter prototype. Independent of `electron/`. |
 | `apps.json`, `settings.json`, `user.json` | A one-time migration seed for first run (see [Where your data lives](#where-your-data-lives)) — no longer the live data after that. |
 | `assets/` | Used by `console_launcher.py` only; the Electron app has its own copy under `electron/assets/`. |

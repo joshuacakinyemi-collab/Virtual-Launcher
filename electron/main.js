@@ -34,6 +34,9 @@ function userJsonPath() {
 function iconCacheDir() {
   return path.join(userDataDir(), 'app_icons');
 }
+function fontsDir() {
+  return path.join(userDataDir(), 'fonts');
+}
 
 // One-time migration from this project's old pre-packaging layout (data
 // files sitting next to the repo). Safe to call every launch: it only ever
@@ -64,7 +67,7 @@ const TIMEZONES = [
   'Australia/Sydney', 'Pacific/Auckland',
 ];
 
-const DEFAULT_THEME_COLOR = '#0e6cc4';
+const DEFAULT_THEME_COLOR = '#2f8fe0';
 const WINDOW_W = 960;
 const WINDOW_H = 600;
 
@@ -88,8 +91,6 @@ function loadApps() {
       // backward compatibility with apps.json files saved before the
       // icon/banner split.
       bannerPath: item.banner_path || item.art_path || null,
-      description: item.description || '',
-      tags: Array.isArray(item.tags) ? item.tags.filter((t) => typeof t === 'string') : [],
       playtimeSeconds: Number.isFinite(item.playtime_seconds) ? item.playtime_seconds : 0,
       slug: slugFor(item.path || ''),
     }));
@@ -105,8 +106,6 @@ function saveApps(apps) {
       path: a.path,
       icon_path: a.iconPath || null,
       banner_path: a.bannerPath || null,
-      description: a.description || '',
-      tags: a.tags || [],
       playtime_seconds: a.playtimeSeconds || 0,
     })),
   };
@@ -153,29 +152,46 @@ function writeRawSettings(partial) {
 
 function loadSettings() {
   const data = loadRawSettings();
-  let themeColor = DEFAULT_THEME_COLOR;
-  const customColors = {};
-  if (data.theme_color) themeColor = data.theme_color;
-  if (data.custom_colors && typeof data.custom_colors === 'object') {
-    for (const [key, value] of Object.entries(data.custom_colors)) {
-      if (['glow', 'tile'].includes(key) && typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value)) {
-        customColors[key] = value;
-      }
+  const themeColor = data.theme_color || DEFAULT_THEME_COLOR;
+  let customFonts = Array.isArray(data.custom_fonts)
+    ? data.custom_fonts.filter((f) => f && typeof f.fileName === 'string' && typeof f.displayName === 'string')
+    : [];
+  const fontPath = typeof data.font_path === 'string' ? data.font_path : null;
+
+  // Back-fills a list entry for a font_path that predates custom_fonts
+  // (set by an older build, or before this list existed at all) — without
+  // this, an already-active font would silently have no row to reselect
+  // it from, as if it had never been imported. Only for paths already
+  // inside fontsDir(): select-font reactivates an entry by joining
+  // fontsDir() with its fileName, so backfilling an *external* path here
+  // (a pre-copy-feature reference living elsewhere) would silently break
+  // the moment it's reselected, pointing at a file that was never there.
+  if (fontPath && path.dirname(fontPath) === fontsDir() && fs.existsSync(fontPath)) {
+    const fileName = path.basename(fontPath);
+    if (!customFonts.some((f) => f.fileName === fileName)) {
+      const displayName = path.basename(fontPath, path.extname(fontPath));
+      customFonts = [...customFonts, { fileName, displayName }];
+      writeRawSettings({ custom_fonts: customFonts });
     }
   }
+
   return {
     themeColor,
-    customColors,
-    fontPath: typeof data.font_path === 'string' ? data.font_path : null,
+    fontPath,
     fontFamily: typeof data.font_family === 'string' ? data.font_family : null,
     fontSize: ['small', 'medium', 'large'].includes(data.font_size) ? data.font_size : 'medium',
+    customFonts,
     timezone: typeof data.timezone === 'string' ? data.timezone : null,
     timeFormat: data.time_format === '12h' ? '12h' : '24h',
   };
 }
 
-function saveSettings(themeColor, customColors) {
-  writeRawSettings({ theme_color: themeColor, custom_colors: customColors });
+// A single accent color is the only thing a user sets directly — glow/tile
+// are always derived from it (Theme.computeTheme in the renderer), so the
+// palette can't drift into a mismatched combination the way independently
+// overriding glow/tile used to allow.
+function saveSettings(themeColor) {
+  writeRawSettings({ theme_color: themeColor });
 }
 
 function saveDisplaySettings({ fontPath, fontFamily, fontSize, timezone, timeFormat }) {
@@ -289,6 +305,7 @@ function createWindow() {
     minHeight: 420,
     center: true,
     resizable: true,
+    fullscreen: true,
     icon: APP_ICON_PATH,
     backgroundColor: '#000000',
     webPreferences: {
@@ -329,15 +346,15 @@ app.on('window-all-closed', () => {
 });
 
 ipcMain.handle('get-state', () => {
-  const { themeColor, customColors, fontPath, fontFamily, fontSize, timezone, timeFormat } = loadSettings();
+  const { themeColor, fontPath, fontFamily, fontSize, customFonts, timezone, timeFormat } = loadSettings();
   return {
     apps: loadApps(),
     user: loadUser(),
     themeColor,
-    customColors,
     fontPath,
     fontFamily,
     fontSize,
+    customFonts,
     timezone,
     timeFormat,
     timezones: TIMEZONES,
@@ -365,6 +382,14 @@ ipcMain.handle('choose-image-path', async () => {
   return result.filePaths[0];
 });
 
+// Copies the picked font file into the app's own data directory rather than
+// referencing it in place — otherwise the custom font silently breaks the
+// next time the original file gets moved, renamed, or deleted, since
+// nothing about picking it keeps that original path alive. Every distinct
+// font imported is kept (not just the currently active one) and recorded
+// in custom_fonts, so Change Font can offer a "pick from what you've
+// already imported" list instead of forcing another trip through the file
+// browser every time.
 ipcMain.handle('choose-font-path', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Choose a font',
@@ -372,27 +397,95 @@ ipcMain.handle('choose-font-path', async () => {
     filters: [{ name: 'Fonts', extensions: ['ttf', 'otf', 'woff', 'woff2'] }],
   });
   if (result.canceled || result.filePaths.length === 0) return null;
-  return result.filePaths[0];
+  const srcPath = result.filePaths[0];
+  const ext = path.extname(srcPath) || '.ttf';
+  const displayName = path.basename(srcPath, path.extname(srcPath)) || 'Custom Font';
+  const safeBase = displayName.replace(/[^A-Za-z0-9_-]+/g, '_') || 'font';
+
+  fs.mkdirSync(fontsDir(), { recursive: true });
+  const settings = loadSettings();
+  const existingList = settings.customFonts;
+
+  // Reuse an existing stored copy if this exact file was already imported
+  // (same bytes), instead of piling up duplicate entries for the same font.
+  const srcBuf = fs.readFileSync(srcPath);
+  const duplicate = existingList.find((f) => {
+    try {
+      return fs.readFileSync(path.join(fontsDir(), f.fileName)).equals(srcBuf);
+    } catch {
+      return false;
+    }
+  });
+
+  let fileName;
+  if (duplicate) {
+    fileName = duplicate.fileName;
+  } else {
+    fileName = `${safeBase}${ext}`;
+    let counter = 2;
+    while (fs.existsSync(path.join(fontsDir(), fileName))) {
+      fileName = `${safeBase}_${counter}${ext}`;
+      counter += 1;
+    }
+    fs.writeFileSync(path.join(fontsDir(), fileName), srcBuf);
+  }
+
+  const customFonts = duplicate
+    ? existingList
+    : [...existingList, { fileName, displayName }];
+
+  const destPath = path.join(fontsDir(), fileName);
+  writeRawSettings({ custom_fonts: customFonts, font_path: destPath, font_family: 'CustomUserFont' });
+  return { path: destPath, fileName, displayName, customFonts };
 });
 
-ipcMain.handle('add-app', (_event, { name, path: appPath, bannerPath }) => {
+// Activates a previously-imported font by its stored fileName — no file
+// browser involved, since it's already sitting in fontsDir().
+ipcMain.handle('select-font', (_event, fileName) => {
+  const settings = loadSettings();
+  const entry = settings.customFonts.find((f) => f.fileName === fileName);
+  if (!entry) return loadSettings();
+  writeRawSettings({ font_path: path.join(fontsDir(), fileName), font_family: 'CustomUserFont' });
+  return loadSettings();
+});
+
+// Removes a stored font (the file and its entry in custom_fonts). If it
+// was the active one, falls back to the default font.
+ipcMain.handle('remove-font', (_event, fileName) => {
+  const settings = loadSettings();
+  const wasActive = settings.fontPath === path.join(fontsDir(), fileName);
+  const customFonts = settings.customFonts.filter((f) => f.fileName !== fileName);
+  try {
+    fs.unlinkSync(path.join(fontsDir(), fileName));
+  } catch {
+    // already gone
+  }
+  writeRawSettings({
+    custom_fonts: customFonts,
+    ...(wasActive ? { font_path: null, font_family: null } : {}),
+  });
+  return loadSettings();
+});
+
+ipcMain.handle('add-app', (_event, { name, path: appPath, iconPath, bannerPath }) => {
   const apps = loadApps();
-  const iconPath = extractAppIcon(appPath);
+  // An explicitly picked icon (SteamGridDB search or a local file, chosen
+  // during Add Game) wins; otherwise fall back to OS icon extraction, same
+  // as before this had its own icon-picking step.
+  const resolvedIconPath = iconPath || extractAppIcon(appPath);
   apps.push({
-    name, path: appPath, iconPath, bannerPath: bannerPath || null,
-    description: '', tags: [], playtimeSeconds: 0, slug: slugFor(appPath),
+    name, path: appPath, iconPath: resolvedIconPath, bannerPath: bannerPath || null,
+    playtimeSeconds: 0, slug: slugFor(appPath),
   });
   saveApps(apps);
   return loadApps();
 });
 
-ipcMain.handle('update-app', (_event, { slug, name, description, tags, iconPath, bannerPath }) => {
+ipcMain.handle('update-app', (_event, { slug, name, iconPath, bannerPath }) => {
   const apps = loadApps();
   const entry = apps.find((a) => a.slug === slug);
   if (!entry) return loadApps();
   if (typeof name === 'string' && name) entry.name = name;
-  if (typeof description === 'string') entry.description = description;
-  if (Array.isArray(tags)) entry.tags = tags;
   if (iconPath !== undefined) entry.iconPath = iconPath;
   if (bannerPath !== undefined) entry.bannerPath = bannerPath;
   saveApps(apps);
@@ -416,8 +509,8 @@ ipcMain.handle('remove-app', (_event, slug) => {
   return loadApps();
 });
 
-ipcMain.handle('save-settings', (_event, { themeColor, customColors }) => {
-  saveSettings(themeColor, customColors);
+ipcMain.handle('save-settings', (_event, { themeColor }) => {
+  saveSettings(themeColor);
   return true;
 });
 

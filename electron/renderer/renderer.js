@@ -1,15 +1,32 @@
 const state = {
-  apps: [], themeColor: '#0e6cc4', customColors: {}, theme: null, assetsDir: '',
+  apps: [], themeColor: '#0e6cc4', theme: null, assetsDir: '',
   user: { name: 'Player', iconPath: null },
-  fontPath: null, fontFamily: null, fontSize: 'medium',
+  fontPath: null, fontFamily: null, fontSize: 'medium', customFonts: [],
   timezone: null, timeFormat: '24h', timezones: [],
 };
-const ui = { screen: 'menu', selectedSlug: null, updateGameSlug: null };
+const ui = { screen: 'menu', updateGameSlug: null, selectedSlug: null };
 
-const COLOR_PARTS = [['accent', 'Menu Color'], ['glow', 'Glow'], ['tile', 'Tile']];
-const SETTINGS_GRID_COLS = 4;
+// A curated accent palette (Menu Color) — picking one of these recolors
+// the whole theme in one step; glow/tile always derive from it
+// (Theme.computeTheme), so the result can't end up mismatched the way
+// independently adjustable glow/tile sliders used to allow.
+const PRESET_ACCENTS = [
+  ['#2f8fe0', 'Ocean Blue'],
+  ['#4338ca', 'Deep Indigo'],
+  ['#7c5cff', 'Royal Purple'],
+  ['#b53dff', 'Magenta'],
+  ['#ff2d95', 'Hot Pink'],
+  ['#e0473f', 'Crimson'],
+  ['#ff8a3d', 'Sunset Orange'],
+  ['#f2b705', 'Golden Yellow'],
+  ['#2ecc71', 'Emerald'],
+  ['#21965c', 'Forest Green'],
+  ['#17c3b2', 'Teal'],
+  ['#29c5f6', 'Sky Cyan'],
+];
 
 let clockInterval = null;
+let screenInterval = null;
 let currentKeyHandler = null;
 let modalOpen = false;
 let fontStyleEl = null;
@@ -22,10 +39,40 @@ function fileUrl(p) {
   return 'file://' + encodeURI(p);
 }
 
-function formatClock() {
+function formatClock(tz) {
   const opts = { hour: '2-digit', minute: '2-digit', hour12: state.timeFormat === '12h' };
-  if (state.timezone) opts.timeZone = state.timezone;
+  const zone = tz !== undefined ? tz : state.timezone;
+  if (zone) opts.timeZone = zone;
   return new Intl.DateTimeFormat('en-US', opts).format(new Date());
+}
+
+// Offset of an IANA zone from UTC, in minutes, at this instant (DST-aware).
+// null/undefined means "system default zone".
+function tzOffsetMinutes(tz) {
+  const now = new Date();
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz || undefined, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const parts = dtf.formatToParts(now).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  // Midnight-24h rolls "24" back to "00" in some locales' formatToParts output.
+  const hour = parts.hour === '24' ? '0' : parts.hour;
+  const asUTC = Date.UTC(parts.year, parts.month - 1, parts.day, hour, parts.minute, parts.second);
+  return Math.round((asUTC - now.getTime()) / 60000);
+}
+
+// Human label for how far `tz` is from `baseTz` right now, e.g. "+3h", "-30m", "Same time".
+function zoneDiffLabel(tz, baseTz) {
+  const diff = tzOffsetMinutes(tz) - tzOffsetMinutes(baseTz);
+  if (diff === 0) return 'Same time';
+  const sign = diff > 0 ? '+' : '-';
+  const abs = Math.abs(diff);
+  const h = Math.floor(abs / 60);
+  const m = abs % 60;
+  if (h === 0) return `${sign}${m}m`;
+  if (m === 0) return `${sign}${h}h`;
+  return `${sign}${h}h ${m}m`;
 }
 
 function formatPlaytime(seconds) {
@@ -92,6 +139,20 @@ async function persistDisplaySettings() {
 window.addEventListener('keydown', (e) => {
   if (modalOpen) return;
   if (currentKeyHandler) currentKeyHandler(e);
+});
+
+/* ---------- responsive re-layout ---------- */
+
+// CSS alone (clamp()/auto-fill) handles most of "fit the window", but
+// screens with JS-computed layout — the settings grid's nav column count,
+// chiefly — need a rebuild when the window actually changes size, not just
+// a style recalculation. Debounced so a drag-resize doesn't re-render on
+// every intermediate pixel, only once it settles.
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  if (modalOpen) return;
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => render(), 150);
 });
 
 /* ---------- gamepad nav ---------- */
@@ -163,14 +224,21 @@ function pollGamepads() {
 // lists — vertical mode leaves Left/Right unhandled so a caller can use an
 // unconsumed ArrowLeft to mean "leave this list" (e.g. back to the category
 // rail) without the two meanings colliding.
-function createNav(items, { onEscape, vertical = false } = {}) {
-  let index = 0;
+function createNav(items, { onEscape, vertical = false, onFocus, initialIndex = 0 } = {}) {
+  let index = items.length ? Math.max(0, Math.min(items.length - 1, initialIndex)) : 0;
   function apply() {
     items.forEach((it, i) => it.el.classList.toggle('kbd-focus', i === index));
     // Follows the focused item into view when a list overflows its
     // container — 'nearest' only scrolls if it's actually off-screen, so
     // this is a no-op (no jitter) when everything already fits.
     items[index]?.el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+    // Keeps real DOM focus in sync with the visual highlight — a no-op for
+    // plain divs (tiles, rows), but matters for actual <button> elements
+    // (modal dialogs): without this, moving the highlight left the native
+    // focus ring behind on whichever button got an explicit .focus() call
+    // at mount, so two different buttons looked focused at once.
+    items[index]?.el.focus?.();
+    if (onFocus && items[index]) onFocus(items[index], index);
   }
   if (items.length) apply();
   function move(delta) {
@@ -200,6 +268,7 @@ function create2DNav(items, cols, { onEscape } = {}) {
   function apply() {
     items.forEach((it, i) => it.el.classList.toggle('kbd-focus', i === index));
     items[index]?.el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+    items[index]?.el.focus?.();
   }
   if (items.length) apply();
   function moveTo(newIndex) {
@@ -225,9 +294,28 @@ function create2DNav(items, cols, { onEscape } = {}) {
   return { handleKey, activate, getIndex: () => index };
 }
 
+// The settings grid's CSS (repeat(auto-fill, ...)) wraps to however many
+// columns actually fit the window, so 2D nav can't assume a fixed column
+// count — this measures it from the real, already-laid-out DOM (items
+// sharing the first item's offsetTop are on its row) instead of
+// recomputing the same width math CSS already did.
+function countGridColumns(items) {
+  if (!items.length) return 1;
+  const firstTop = items[0].el.offsetTop;
+  let cols = 0;
+  for (const it of items) {
+    if (it.el.offsetTop === firstTop) cols++;
+    else break;
+  }
+  return cols || 1;
+}
+
 /* ---------- modals ---------- */
 
-function openModal(build, { wide = false } = {}) {
+// `hints` replaces the footer bar's content for as long as this modal is
+// open (restored on close) — the underlying screen's hints (e.g. "Enter
+// Select") describe its own list, not the dialog now covering it.
+function openModal(build, { wide = false, hints } = {}) {
   return new Promise((resolve) => {
     modalOpen = true;
     const root = document.getElementById('modal-root');
@@ -238,9 +326,14 @@ function openModal(build, { wide = false } = {}) {
     modal.className = wide ? 'modal wide' : 'modal';
     backdrop.appendChild(modal);
 
+    const footer = document.getElementById('footer-hints');
+    const previousHintsHTML = footer.innerHTML;
+    if (hints) setHints(hints);
+
     function close(value) {
       modalOpen = false;
       root.innerHTML = '';
+      footer.innerHTML = previousHintsHTML;
       resolve(value);
     }
 
@@ -250,15 +343,14 @@ function openModal(build, { wide = false } = {}) {
   });
 }
 
-function showPrompt(title, label, initialValue, { multiline = false } = {}) {
+function showPrompt(title, label, initialValue) {
   return openModal((modal, close) => {
     const h = document.createElement('h3');
     h.textContent = title;
     const lbl = document.createElement('label');
     lbl.textContent = label;
-    const input = document.createElement(multiline ? 'textarea' : 'input');
-    if (!multiline) input.type = 'text';
-    else input.rows = 4;
+    const input = document.createElement('input');
+    input.type = 'text';
     input.value = initialValue || '';
     const buttons = document.createElement('div');
     buttons.className = 'modal-buttons';
@@ -271,20 +363,22 @@ function showPrompt(title, label, initialValue, { multiline = false } = {}) {
     buttons.append(cancelBtn, okBtn);
     modal.append(h, lbl, input, buttons);
 
-    // Multiline (description) submits the raw value, including empty
-    // string, so clearing a description is distinguishable from Cancel;
-    // single-line fields keep the simpler "empty submit = cancel" behavior.
     cancelBtn.onclick = () => close(null);
-    okBtn.onclick = () => close(multiline ? input.value : (input.value.trim() || null));
+    okBtn.onclick = () => close(input.value.trim() || null);
     input.addEventListener('keydown', (e) => {
       e.stopPropagation();
       if (e.key === 'Escape') close(null);
-      if (e.key === 'Enter' && !multiline) close(input.value.trim() || null);
+      if (e.key === 'Enter') close(input.value.trim() || null);
     });
     setTimeout(() => { input.focus(); input.select(); }, 0);
-  });
+  }, { hints: [{ key: 'Enter', label: 'OK' }, { key: 'Esc', label: 'Cancel' }] });
 }
 
+// Enter/Escape still work as shortcuts (Escape = Cancel, matching every
+// other screen's Back convention), but Cancel/Confirm are also a real
+// Left/Right-navigable list with a visible focus ring on both buttons —
+// without that, only Confirm ever showed as focused and Cancel was a
+// mouse-only dead end, even though Escape happened to reach it.
 function showConfirm(title, message, confirmLabel = 'Confirm') {
   return openModal((modal, close) => {
     const h = document.createElement('h3');
@@ -304,12 +398,15 @@ function showConfirm(title, message, confirmLabel = 'Confirm') {
 
     noBtn.onclick = () => close(false);
     yesBtn.onclick = () => close(true);
-    modal.parentElement.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') close(false);
-      if (e.key === 'Enter') close(true);
-    });
+
+    const items = [
+      { el: noBtn, activate: () => close(false) },
+      { el: yesBtn, activate: () => close(true) },
+    ];
+    const nav = createNav(items, { onEscape: () => close(false), initialIndex: 1 });
+    modal.parentElement.addEventListener('keydown', (e) => nav.handleKey(e));
     setTimeout(() => yesBtn.focus(), 0);
-  });
+  }, { hints: [{ key: '←→', label: 'Choose' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Cancel' }] });
 }
 
 function showError(title, message) {
@@ -328,14 +425,16 @@ function showError(title, message) {
     modal.append(h, p, buttons);
 
     okBtn.onclick = () => close();
-    modal.parentElement.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === 'Escape') close();
-    });
+    const nav = createNav([{ el: okBtn, activate: () => close() }], { onEscape: () => close() });
+    modal.parentElement.addEventListener('keydown', (e) => nav.handleKey(e));
     setTimeout(() => okBtn.focus(), 0);
-  });
+  }, { hints: [{ key: 'Enter', label: 'OK' }] });
 }
 
-// Generic small choice modal — options: [{label, value, primary}].
+// Generic small choice modal — options: [{label, value, primary}]. Buttons
+// are a horizontal list, so it uses the same createNav (Left/Right + Enter)
+// every other on-screen list uses — a gamepad/keyboard user can pick any
+// option here, not just click one with a mouse.
 function showChoice(title, message, options) {
   return openModal((modal, close) => {
     const h = document.createElement('h3');
@@ -344,18 +443,21 @@ function showChoice(title, message, options) {
     p.textContent = message;
     const buttons = document.createElement('div');
     buttons.className = 'modal-buttons';
+    const btnItems = [];
     options.forEach((opt) => {
       const btn = document.createElement('button');
       btn.textContent = opt.label;
       btn.className = opt.primary ? 'primary' : 'secondary';
       btn.onclick = () => close(opt.value);
       buttons.appendChild(btn);
+      btnItems.push({ el: btn, activate: () => close(opt.value) });
     });
     modal.append(h, p, buttons);
-    modal.parentElement.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') close(null);
-    });
-  });
+
+    const nav = createNav(btnItems, { onEscape: () => close(null) });
+    modal.parentElement.addEventListener('keydown', (e) => nav.handleKey(e));
+    setTimeout(() => btnItems[0]?.el.focus(), 0);
+  }, { hints: [{ key: '←→', label: 'Choose' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Cancel' }] });
 }
 
 // Non-interactive modal for a brief async wait (SteamGridDB search/fetch) —
@@ -381,7 +483,7 @@ function showLoadingModal(text) {
   };
 }
 
-function showArtPicker(gameName, grids) {
+function showArtPicker(gameName, grids, kind = 'banner') {
   return openModal((modal, close) => {
     const h = document.createElement('h3');
     h.textContent = `Art for "${gameName}"`;
@@ -392,7 +494,9 @@ function showArtPicker(gameName, grids) {
     const thumbItems = [];
     grids.forEach((g) => {
       const img = document.createElement('img');
-      img.className = 'art-thumb';
+      // Icons are square; banners/grids are portrait — squashing an icon
+      // into the banner's 2:3 box visibly distorts it.
+      img.className = kind === 'icon' ? 'art-thumb art-thumb-icon' : 'art-thumb';
       img.src = g.thumb;
       img.addEventListener('click', () => close(g.url));
       grid.appendChild(img);
@@ -412,7 +516,7 @@ function showArtPicker(gameName, grids) {
     const items = thumbItems.concat([{ el: skipBtn, activate: () => close(null) }]);
     const nav = create2DNav(items, 3, { onEscape: () => close(null) });
     modal.parentElement.addEventListener('keydown', (e) => nav.handleKey(e));
-  }, { wide: true });
+  }, { wide: true, hints: [{ key: '↑↓←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Skip' }] });
 }
 
 async function manageSteamGridDbKey() {
@@ -446,7 +550,7 @@ async function pickSteamGridDbArt(name, appPath, kind = 'banner') {
   hideLoading();
   if (!gridsRes.ok || !gridsRes.grids.length) return null;
 
-  const chosenUrl = await showArtPicker(searchRes.results[0].name, gridsRes.grids);
+  const chosenUrl = await showArtPicker(searchRes.results[0].name, gridsRes.grids, kind);
   if (!chosenUrl) return null;
 
   hideLoading = showLoadingModal('Downloading…');
@@ -641,15 +745,17 @@ function buildScreenTitle(text) {
   return el;
 }
 
-// Persistent header used by every screen: player icon+name (click to edit),
-// clock, a settings-gear shortcut, and power. Sub-screens show their own
-// heading in the body via buildScreenTitle instead of the header changing.
-// Purely informational — no interactive controls live here. Header buttons
-// (Settings gear, Power) used to be mouse-only dead ends for a controller,
-// since nothing in this app is Tab-reachable outside the sidebar's own
-// nav. Settings and Quit are now sidebar entries instead (see renderMenu),
-// so every action is reachable the same way: navigate the list, press
-// Enter/Select.
+// Persistent header used by every screen: player icon+name (click to open
+// Update Player), clock, a settings-gear shortcut, and power. Sub-screens
+// show their own heading in the body via buildScreenTitle instead of the
+// header changing.
+//
+// The Settings/Power icons are a mouse convenience layered on top of, not
+// instead of, the sidebar's own Settings/Quit entries (see renderMenu) —
+// those stay the authoritative controller/keyboard-reachable path (every
+// screen's nav already reaches Settings, and Quit from the home screen),
+// so adding mouse-clickable header icons here doesn't reintroduce the
+// mouse-only dead end the header deliberately avoided before.
 function buildHeader() {
   const header = document.createElement('div');
   header.className = 'header';
@@ -666,10 +772,16 @@ function buildHeader() {
   } else {
     playerIcon.textContent = (state.user.name[0] || 'P').toUpperCase();
   }
+  const playerBox = document.createElement('div');
+  playerBox.className = 'header-player-box';
   const playerName = document.createElement('div');
   playerName.className = 'header-player-name';
   playerName.textContent = state.user.name;
-  left.append(playerIcon, playerName);
+  playerBox.appendChild(playerName);
+  const goUpdateUser = () => { ui.screen = 'updateUser'; render(); };
+  playerIcon.addEventListener('click', goUpdateUser);
+  playerBox.addEventListener('click', goUpdateUser);
+  left.append(playerIcon, playerBox);
 
   const right = document.createElement('div');
   right.className = 'header-right';
@@ -679,7 +791,21 @@ function buildHeader() {
   clock.textContent = formatClock();
   clockInterval = setInterval(() => { clock.textContent = formatClock(); }, 1000);
 
-  right.append(clock);
+  const settingsBtn = document.createElement('div');
+  settingsBtn.className = 'header-icon-btn';
+  settingsBtn.title = 'Settings';
+  settingsBtn.textContent = '⚙';
+  settingsBtn.addEventListener('click', () => { ui.screen = 'settings'; render(); });
+
+  const powerBtn = document.createElement('div');
+  powerBtn.className = 'header-icon-btn header-power-btn';
+  powerBtn.title = 'Quit';
+  powerBtn.textContent = '⏻';
+  powerBtn.addEventListener('click', async () => {
+    if (await showConfirm('Quit', 'Quit the launcher?', 'Quit')) window.api.quit();
+  });
+
+  right.append(clock, settingsBtn, powerBtn);
   header.append(left, right);
   return header;
 }
@@ -688,16 +814,18 @@ function buildHeader() {
 
 function render() {
   clearInterval(clockInterval);
+  clearInterval(screenInterval);
+  screenInterval = null;
   currentKeyHandler = null;
   const appEl = document.getElementById('app');
   appEl.innerHTML = '';
   if (ui.screen === 'menu') renderMenu(appEl);
   else if (ui.screen === 'settings') renderSettings(appEl);
-  else if (ui.screen === 'detail') renderDetail(appEl);
   else if (ui.screen === 'remove') renderRemove(appEl);
   else if (ui.screen === 'color') renderColor(appEl);
   else if (ui.screen === 'updateGamePick') renderUpdateGamePick(appEl);
   else if (ui.screen === 'updateGameEdit') renderUpdateGameEdit(appEl);
+  else if (ui.screen === 'updateUser') renderUpdateUser(appEl);
   else if (ui.screen === 'font') renderFont(appEl);
   else if (ui.screen === 'time') renderTime(appEl);
 }
@@ -723,7 +851,7 @@ async function activateSettingsEntry(entry) {
   else if (entry.kind === 'remove') { ui.screen = 'remove'; render(); }
   else if (entry.kind === 'updateGame') { ui.screen = 'updateGamePick'; render(); }
   else if (entry.kind === 'color') { ui.screen = 'color'; render(); }
-  else if (entry.kind === 'updateUser') await manageUpdateUser();
+  else if (entry.kind === 'updateUser') { ui.screen = 'updateUser'; render(); }
   else if (entry.kind === 'font') { ui.screen = 'font'; render(); }
   else if (entry.kind === 'time') { ui.screen = 'time'; render(); }
   else if (entry.kind === 'steamgriddb') await manageSteamGridDbKey();
@@ -742,33 +870,95 @@ async function addGameFlow() {
   const defaultName = base.replace(/\.[^.]+$/, '');
   const name = await showPrompt('New app', 'Name:', defaultName);
   if (!name) return;
-  const bannerPath = await pickSteamGridDbArt(name, chosen, 'banner');
-  state.apps = await window.api.addApp({ name, path: chosen, bannerPath });
+  const iconPath = await pickImageFor('icon', name, chosen);
+  const bannerPath = await pickImageFor('banner', name, chosen);
+  state.apps = await window.api.addApp({ name, path: chosen, iconPath, bannerPath });
   render();
 }
 
-async function manageUpdateUser() {
-  const name = await showPrompt('Update Player', 'Name:', state.user.name);
-  const choice = await showChoice('Player Icon', 'Choose a new icon, or keep the current one.', [
-    { label: 'Choose File', value: 'file', primary: true },
-    { label: 'Keep Current', value: 'keep' },
-  ]);
-  let iconPath;
-  if (choice === 'file') {
+/* ---------- update user: pick what to change, then edit just that ---------- */
+
+// Unlike the old flow (which always asked for a new name AND a new icon,
+// every time), this screen lists Name/Icon as separate rows — the same
+// "row shows current value, click/Enter edits just that field" pattern as
+// Update Game — so choosing to change one never forces a decision on the
+// other, and it's always visible what the current value is before you
+// change it.
+function renderUpdateUser(appEl) {
+  const header = buildHeader();
+  const body = document.createElement('div');
+  body.className = 'subscreen-body';
+  body.appendChild(buildScreenTitle('Update Player'));
+  const subtitle = document.createElement('div');
+  subtitle.className = 'screen-subtitle';
+  subtitle.textContent = 'Choose what to change — everything else stays the same.';
+  body.appendChild(subtitle);
+
+  const form = document.createElement('div');
+  form.className = 'update-form';
+
+  const nameRow = document.createElement('div');
+  nameRow.className = 'update-row';
+  const nameLabel = document.createElement('div');
+  nameLabel.className = 'update-row-label';
+  nameLabel.textContent = 'Name';
+  const nameVal = document.createElement('div');
+  nameVal.className = 'update-row-value';
+  nameVal.textContent = state.user.name;
+  nameRow.append(nameLabel, nameVal);
+  const doChangeName = async () => {
+    const name = await showPrompt('Change Name', 'Player name:', state.user.name);
+    if (!name) return;
+    state.user = await window.api.updateUser({ name });
+    render();
+  };
+  nameRow.addEventListener('click', doChangeName);
+
+  const iconRow = document.createElement('div');
+  iconRow.className = 'update-row';
+  const iconLabel = document.createElement('div');
+  iconLabel.className = 'update-row-label';
+  iconLabel.textContent = 'Icon';
+  const iconVal = document.createElement('div');
+  iconVal.className = 'update-row-value';
+  iconVal.textContent = state.user.iconPath ? 'Set' : '(none)';
+  iconRow.append(iconLabel, iconVal);
+  const doChangeIcon = async () => {
     const picked = await window.api.chooseImagePath();
-    if (picked) iconPath = picked;
-  }
-  const payload = {};
-  if (name) payload.name = name;
-  if (iconPath) payload.iconPath = iconPath;
-  if (Object.keys(payload).length === 0) return;
-  state.user = await window.api.updateUser(payload);
-  render();
+    if (!picked) return;
+    state.user = await window.api.updateUser({ iconPath: picked });
+    render();
+  };
+  iconRow.addEventListener('click', doChangeIcon);
+
+  form.append(nameRow, iconRow);
+
+  const goBack = () => { ui.screen = 'settings'; render(); };
+  const backBtn = document.createElement('div');
+  backBtn.className = 'detail-btn secondary';
+  backBtn.textContent = 'Back';
+  backBtn.addEventListener('click', goBack);
+
+  body.append(form, backBtn);
+  appEl.append(header, body);
+
+  const items = [
+    { el: nameRow, activate: doChangeName },
+    { el: iconRow, activate: doChangeIcon },
+    { el: backBtn, activate: goBack },
+  ];
+  const nav = createNav(items, { vertical: true, onEscape: goBack });
+  currentKeyHandler = (e) => nav.handleKey(e);
+
+  setHints([{ key: '↑↓', label: 'Navigate' }, { key: 'Enter', label: 'Change' }, { key: 'Esc', label: 'Back' }]);
 }
 
-// Home screen: the sidebar holds the games directly (no separate category
-// step to get to them) plus a Settings entry at the end. Selecting a game
-// opens its detail/Play screen; selecting Settings opens the settings grid.
+// Home screen: sidebar + a live detail pane, side by side on one screen —
+// hovering or keyboard-focusing a game updates the pane in place, no screen
+// transition. Selecting (click/Enter) a game launches it directly; the
+// pane's own Play/Cancel buttons mirror that for mouse users. Settings and
+// Quit stay in the same list (keyboard/gamepad-reachable), unaffected by
+// which game the pane happens to be showing.
 function renderMenu(appEl) {
   const header = buildHeader();
 
@@ -777,6 +967,20 @@ function renderMenu(appEl) {
 
   const entries = state.apps.map((a) => ({ kind: 'game', ...a }))
     .concat([{ kind: 'settings', name: 'Settings' }, { kind: 'quit', name: 'Quit' }]);
+
+  const firstGame = entries.find((e) => e.kind === 'game');
+  if (!entries.some((e) => e.kind === 'game' && e.slug === ui.selectedSlug)) {
+    ui.selectedSlug = firstGame ? firstGame.slug : null;
+  }
+
+  const detailPane = buildDetailPane();
+  fillDetailPane(detailPane, entries.find((e) => e.kind === 'game' && e.slug === ui.selectedSlug));
+
+  // Selecting a game (click, hover, or keyboard/gamepad focus) only
+  // previews it in the detail pane now — launching requires the Play
+  // button specifically, so the icon/row itself is never a launch
+  // shortcut. Settings/Quit are unaffected: selecting those still acts
+  // immediately, same as before.
   const { listEl, items } = buildGameList(entries, async (entry) => {
     if (entry.kind === 'settings') {
       ui.screen = 'settings';
@@ -787,54 +991,124 @@ function renderMenu(appEl) {
       if (await showConfirm('Quit', 'Quit the launcher?', 'Quit')) window.api.quit();
       return;
     }
-    ui.selectedSlug = entry.slug;
-    ui.screen = 'detail';
-    render();
+    if (zone === 'play') focusList();
+    selectEntry(entry);
   });
-  body.appendChild(listEl);
-  appEl.append(header, body);
 
-  const nav = createNav(items, { vertical: true });
-  currentKeyHandler = (e) => nav.handleKey(e);
-
-  setHints([{ key: '↑↓', label: 'Navigate' }, { key: 'Enter', label: 'Select' }]);
-}
-
-/* ---------- settings grid ---------- */
-
-function renderSettings(appEl) {
-  const header = buildHeader();
-  const body = document.createElement('div');
-  body.className = 'subscreen-body';
-  body.appendChild(buildScreenTitle('Settings'));
-
-  const { gridEl, items } = buildSettingsGrid(settingsEntries(), activateSettingsEntry);
-  body.appendChild(gridEl);
-  appEl.append(header, body);
-
-  const goBack = () => { ui.screen = 'menu'; render(); };
-  const nav = create2DNav(items, SETTINGS_GRID_COLS, { onEscape: goBack });
-  currentKeyHandler = (e) => nav.handleKey(e);
-
-  setHints([{ key: '↑↓←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
-}
-
-/* ---------- game detail / play ---------- */
-
-function renderDetail(appEl) {
-  const entry = findAppBySlug(ui.selectedSlug);
-  if (!entry) {
-    ui.screen = 'menu';
-    render();
-    return;
+  // Keeps the previewed game's row highlighted persistently (Steam
+  // library-style), not just while the pointer/keyboard focus is on it.
+  function selectEntry(entry) {
+    if (entry.kind !== 'game') return;
+    ui.selectedSlug = entry.slug;
+    fillDetailPane(detailPane, entry);
+    items.forEach((item, i) => {
+      const e = entries[i];
+      item.el.classList.toggle('selected', e.kind === 'game' && e.slug === entry.slug);
+    });
   }
 
-  const header = buildHeader();
-  const body = document.createElement('div');
-  body.className = 'detail-body';
+  items.forEach((item, i) => {
+    const entry = entries[i];
+    if (entry.kind !== 'game') return;
+    item.el.classList.toggle('selected', entry.slug === ui.selectedSlug);
+    item.el.addEventListener('mouseenter', () => {
+      if (zone === 'play') focusList();
+      selectEntry(entry);
+    });
+  });
 
-  const top = document.createElement('div');
-  top.className = 'detail-top';
+  body.append(listEl, detailPane);
+  appEl.append(header, body);
+
+  // Two nav zones: the sidebar list, and the detail pane's Play button.
+  // ArrowRight/Enter on a game row moves focus onto Play (mirroring "click
+  // Play" for keyboard/gamepad, not "click the icon"); ArrowLeft/Escape
+  // from Play returns to the list. Settings/Quit rows are untouched by
+  // this — Enter still acts on them immediately, same as always.
+  let zone = 'list';
+
+  // Takes an explicit index rather than reading listNav.getIndex() — this
+  // is called from onFocus, which createNav invokes synchronously during
+  // its own construction (before the `const listNav` assignment below has
+  // completed), so listNav isn't safe to reference from in here.
+  function hintsForIndex(i) {
+    const focused = entries[i];
+    const hints = [{ key: '↑↓', label: 'Navigate' }];
+    if (focused?.kind === 'game') hints.push({ key: '→', label: 'Play' });
+    hints.push({ key: 'Enter', label: 'Select' });
+    return hints;
+  }
+
+  function playButtonEl() {
+    return detailPane.querySelector('.detail-btn.primary');
+  }
+
+  function focusPlay() {
+    const btn = playButtonEl();
+    if (!btn) return;
+    zone = 'play';
+    btn.classList.add('kbd-focus');
+    setHints([{ key: '←', label: 'Back' }, { key: 'Enter', label: 'Play' }]);
+  }
+
+  function focusList() {
+    zone = 'list';
+    const btn = playButtonEl();
+    if (btn) btn.classList.remove('kbd-focus');
+    setHints(hintsForIndex(listNav.getIndex()));
+  }
+
+  const initialIndex = entries.findIndex((e) => e.kind === 'game' && e.slug === ui.selectedSlug);
+  const listNav = createNav(items, {
+    vertical: true,
+    initialIndex: initialIndex >= 0 ? initialIndex : 0,
+    onFocus: (_item, i) => {
+      selectEntry(entries[i]);
+      if (zone === 'list') setHints(hintsForIndex(i));
+    },
+  });
+
+  currentKeyHandler = (e) => {
+    if (zone === 'play') {
+      if (e.key === 'ArrowLeft' || e.key === 'Escape') { focusList(); e.preventDefault(); return; }
+      if (e.key === 'Enter' || e.key === ' ') {
+        const entry = entries.find((en) => en.kind === 'game' && en.slug === ui.selectedSlug);
+        if (entry) launchGame(entry);
+        e.preventDefault();
+        return;
+      }
+      return;
+    }
+    const focused = entries[listNav.getIndex()];
+    if ((e.key === 'ArrowRight' || e.key === 'Enter' || e.key === ' ') && focused?.kind === 'game') {
+      focusPlay();
+      e.preventDefault();
+      return;
+    }
+    listNav.handleKey(e);
+  };
+
+  focusList();
+}
+
+// Builds the detail pane's stable container once per renderMenu call;
+// fillDetailPane() below repopulates its content on every hover/focus
+// change without recreating the pane element itself.
+function buildDetailPane() {
+  const pane = document.createElement('div');
+  pane.className = 'detail-pane';
+  return pane;
+}
+
+function fillDetailPane(pane, entry) {
+  pane.innerHTML = '';
+  if (!entry) return;
+
+  // Icon and banner as their own boxes side by side (icon left, banner
+  // right) — matching the app's wireframe rather than a Steam-style single
+  // hero with the icon overlapping the banner's corner.
+  const topRow = document.createElement('div');
+  topRow.className = 'detail-top-row';
 
   const iconBox = document.createElement('div');
   iconBox.className = 'detail-icon-box';
@@ -850,20 +1124,16 @@ function renderDetail(appEl) {
     iconBox.appendChild(span);
   }
 
-  const bannerCol = document.createElement('div');
-  bannerCol.className = 'detail-banner-col';
   const bannerBox = document.createElement('div');
   bannerBox.className = 'detail-banner-box';
   if (entry.bannerPath) {
-    const img = document.createElement('img');
-    img.src = fileUrl(entry.bannerPath);
-    img.alt = entry.name;
-    bannerBox.appendChild(img);
-  } else {
-    const placeholder = document.createElement('span');
-    placeholder.textContent = 'No banner — add one from Settings → Update Game';
-    bannerBox.appendChild(placeholder);
+    const bannerImg = document.createElement('img');
+    bannerImg.src = fileUrl(entry.bannerPath);
+    bannerImg.alt = entry.name;
+    bannerBox.appendChild(bannerImg);
   }
+
+  topRow.append(iconBox, bannerBox);
 
   const metaRow = document.createElement('div');
   metaRow.className = 'detail-meta-row';
@@ -874,47 +1144,37 @@ function renderDetail(appEl) {
   playtimeEl.className = 'detail-playtime';
   playtimeEl.textContent = formatPlaytime(entry.playtimeSeconds);
   metaRow.append(titleEl, playtimeEl);
-  bannerCol.append(bannerBox, metaRow);
-
-  top.append(iconBox, bannerCol);
-
-  const desc = document.createElement('div');
-  desc.className = 'detail-description';
-  desc.textContent = entry.description || 'No description yet — add one from Settings → Update Game.';
-
-  const tagsRow = document.createElement('div');
-  tagsRow.className = 'detail-tags';
-  (entry.tags || []).forEach((tag) => {
-    const chip = document.createElement('span');
-    chip.className = 'tag-chip';
-    chip.textContent = tag;
-    tagsRow.appendChild(chip);
-  });
 
   const actions = document.createElement('div');
   actions.className = 'detail-actions';
   const playBtn = document.createElement('div');
   playBtn.className = 'detail-btn primary';
   playBtn.textContent = 'Play';
-  const cancelBtn = document.createElement('div');
-  cancelBtn.className = 'detail-btn secondary';
-  cancelBtn.textContent = 'Cancel';
-  const goBack = () => { ui.screen = 'menu'; render(); };
   playBtn.addEventListener('click', () => launchGame(entry));
-  cancelBtn.addEventListener('click', goBack);
-  actions.append(playBtn, cancelBtn);
+  actions.append(playBtn);
 
-  body.append(top, desc, tagsRow, actions);
+  pane.append(topRow, metaRow, actions);
+}
+
+/* ---------- settings grid ---------- */
+
+function renderSettings(appEl) {
+  const header = buildHeader();
+  const body = document.createElement('div');
+  body.className = 'subscreen-body';
+  body.appendChild(buildScreenTitle('Settings'));
+
+  const { gridEl, items } = buildSettingsGrid(settingsEntries(), activateSettingsEntry);
+  body.appendChild(gridEl);
   appEl.append(header, body);
 
-  const nav = createNav([
-    { el: playBtn, activate: () => launchGame(entry) },
-    { el: cancelBtn, activate: goBack },
-  ], { onEscape: goBack });
+  const goBack = () => { ui.screen = 'menu'; render(); };
+  const nav = create2DNav(items, countGridColumns(items), { onEscape: goBack });
   currentKeyHandler = (e) => nav.handleKey(e);
 
-  setHints([{ key: '←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Cancel' }]);
+  setHints([{ key: '↑↓←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
 }
+
 
 /* ---------- remove game ---------- */
 
@@ -992,24 +1252,11 @@ function renderUpdateGameEdit(appEl) {
       if (!name) return;
       state.apps = await window.api.updateApp({ slug: entry.slug, name });
       render();
-    } else if (key === 'description') {
-      const description = await showPrompt('Description', 'Short description:', entry.description || '', { multiline: true });
-      if (description === null) return;
-      state.apps = await window.api.updateApp({ slug: entry.slug, description });
-      render();
-    } else if (key === 'tags') {
-      const tagsText = await showPrompt('Tags', 'Comma-separated tags:', (entry.tags || []).join(', '));
-      if (tagsText === null) return;
-      const tags = tagsText.split(',').map((t) => t.trim()).filter(Boolean);
-      state.apps = await window.api.updateApp({ slug: entry.slug, tags });
-      render();
     }
   }
 
   const fieldRows = [
     { label: 'Name', value: entry.name, key: 'name' },
-    { label: 'Description', value: entry.description || '(none)', key: 'description' },
-    { label: 'Tags', value: (entry.tags && entry.tags.length) ? entry.tags.join(', ') : '(none)', key: 'tags' },
   ].map((r) => {
     const row = document.createElement('div');
     row.className = 'update-row';
@@ -1097,15 +1344,14 @@ function renderFont(appEl) {
 
   const importRow = document.createElement('div');
   importRow.className = 'update-row';
-  importRow.textContent = state.fontFamily ? `Custom font: ${state.fontFamily} (click to change)` : 'Import Font File…';
+  importRow.textContent = 'Import Font File…';
   importRow.addEventListener('click', async () => {
     const picked = await window.api.chooseFontPath();
     if (!picked) return;
-    const family = 'CustomUserFont';
-    applyCustomFont(picked, family);
-    state.fontPath = picked;
-    state.fontFamily = family;
-    await persistDisplaySettings();
+    applyCustomFont(picked.path, 'CustomUserFont');
+    state.fontPath = picked.path;
+    state.fontFamily = 'CustomUserFont';
+    state.customFonts = picked.customFonts;
     render();
   });
 
@@ -1121,6 +1367,68 @@ function renderFont(appEl) {
   });
 
   form.append(importRow, resetRow);
+
+  // Every font ever imported stays listed here (stored in the app's own
+  // data dir — see main.js's choose-font-path), so switching back to one
+  // used before is a click on its row, not another trip through the file
+  // browser to find that file again.
+  const fontListLabel = document.createElement('div');
+  fontListLabel.className = 'screen-subtitle';
+  fontListLabel.textContent = 'Imported Fonts';
+  fontListLabel.style.margin = '16px 0 0 10px';
+
+  const fontList = document.createElement('div');
+  fontList.className = 'timezone-list';
+  const fontRows = state.customFonts.map((font) => {
+    // Windows font_path uses backslashes (path.join on the main-process
+    // side), so a plain endsWith('/'+fileName) would never match there —
+    // compare basenames on either separator instead.
+    const isActive = state.fontPath && state.fontPath.split(/[\\/]/).pop() === font.fileName;
+    const row = document.createElement('div');
+    row.className = 'timezone-row' + (isActive ? ' active' : '');
+    const name = document.createElement('div');
+    name.className = 'timezone-row-name';
+    name.textContent = font.displayName;
+    const status = document.createElement('div');
+    status.className = 'timezone-row-diff';
+    status.textContent = isActive ? 'Active' : 'Select';
+    const removeBtn = document.createElement('div');
+    removeBtn.className = 'timezone-row-diff';
+    removeBtn.textContent = 'Remove';
+    removeBtn.style.cursor = 'pointer';
+    row.append(name, status, removeBtn);
+    const activateFont = async () => {
+      const data = await window.api.selectFont(font.fileName);
+      applyCustomFont(data.fontPath, data.fontFamily);
+      state.fontPath = data.fontPath;
+      state.fontFamily = data.fontFamily;
+      state.customFonts = data.customFonts;
+      render();
+    };
+    row.addEventListener('click', activateFont);
+    removeBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const data = await window.api.removeFont(font.fileName);
+      if (!data.fontPath) applyCustomFont(null, null);
+      state.fontPath = data.fontPath;
+      state.fontFamily = data.fontFamily;
+      state.customFonts = data.customFonts;
+      render();
+    });
+    fontList.appendChild(row);
+    return { el: row, activate: activateFont };
+  });
+  if (!state.customFonts.length) {
+    const empty = document.createElement('div');
+    empty.className = 'game-list-empty';
+    empty.textContent = 'No fonts imported yet.';
+    fontList.appendChild(empty);
+  }
+
+  const sizeLabel = document.createElement('div');
+  sizeLabel.className = 'screen-subtitle';
+  sizeLabel.textContent = `Text Size — currently ${state.fontSize[0].toUpperCase()}${state.fontSize.slice(1)}`;
+  sizeLabel.style.margin = '16px 0 0 10px';
 
   const sizeRow = document.createElement('div');
   sizeRow.className = 'size-options';
@@ -1144,12 +1452,13 @@ function renderFont(appEl) {
   backBtn.textContent = 'Back';
   backBtn.addEventListener('click', goBack);
 
-  body.append(form, sizeRow, backBtn);
+  body.append(form, fontListLabel, fontList, sizeLabel, sizeRow, backBtn);
   appEl.append(header, body);
 
   const items = [
     { el: importRow, activate: () => importRow.click() },
     { el: resetRow, activate: () => resetRow.click() },
+    ...fontRows,
     ...sizeBtns.map((b) => ({ el: b, activate: () => b.click() })),
     { el: backBtn, activate: goBack },
   ];
@@ -1166,6 +1475,10 @@ function renderTime(appEl) {
   const body = document.createElement('div');
   body.className = 'subscreen-body';
   body.appendChild(buildScreenTitle('Time Setting'));
+  const subtitle = document.createElement('div');
+  subtitle.className = 'screen-subtitle';
+  subtitle.textContent = `Currently showing: ${state.timezone || 'System Default'} — ${formatClock(state.timezone)}`;
+  body.appendChild(subtitle);
 
   const formatRow = document.createElement('div');
   formatRow.className = 'size-options';
@@ -1185,19 +1498,36 @@ function renderTime(appEl) {
   const list = document.createElement('div');
   list.className = 'timezone-list';
   const zones = ['System Default', ...state.timezones];
+  // Each row shows the option's own live clock plus how far it sits from
+  // the zone that's actually applied right now (`state.timezone`), so
+  // picking a zone is never a guess at what time it'll show.
   const zoneRows = zones.map((tz) => {
-    const isCurrent = (tz === 'System Default' && !state.timezone) || tz === state.timezone;
+    const zoneValue = tz === 'System Default' ? null : tz;
+    const isCurrent = zoneValue === state.timezone;
     const row = document.createElement('div');
     row.className = 'timezone-row' + (isCurrent ? ' active' : '');
-    row.textContent = tz;
+    const name = document.createElement('div');
+    name.className = 'timezone-row-name';
+    name.textContent = tz;
+    const clock = document.createElement('div');
+    clock.className = 'timezone-row-clock';
+    const diff = document.createElement('div');
+    diff.className = 'timezone-row-diff';
+    row.append(name, clock, diff);
+    function refreshRow() {
+      clock.textContent = formatClock(zoneValue);
+      diff.textContent = isCurrent ? 'Current' : zoneDiffLabel(zoneValue, state.timezone);
+    }
+    refreshRow();
     row.addEventListener('click', async () => {
-      state.timezone = tz === 'System Default' ? null : tz;
+      state.timezone = zoneValue;
       await persistDisplaySettings();
       render();
     });
     list.appendChild(row);
-    return row;
+    return { row, refreshRow };
   });
+  screenInterval = setInterval(() => zoneRows.forEach((r) => r.refreshRow()), 1000);
 
   const goBack = () => { ui.screen = 'settings'; render(); };
   const backBtn = document.createElement('div');
@@ -1210,7 +1540,7 @@ function renderTime(appEl) {
 
   const items = [
     ...formatBtns.map((b) => ({ el: b, activate: () => b.click() })),
-    ...zoneRows.map((r) => ({ el: r, activate: () => r.click() })),
+    ...zoneRows.map((r) => ({ el: r.row, activate: () => r.row.click() })),
     { el: backBtn, activate: goBack },
   ];
   const nav = createNav(items, { vertical: true, onEscape: goBack });
@@ -1221,174 +1551,196 @@ function renderTime(appEl) {
 
 /* ---------- menu color ---------- */
 
+// A tile grid of preset accent swatches, styled like every other tile
+// grid in the app (tile-wrap/tile-surface/bubble) instead of a bespoke
+// look — reusing that language is what makes this screen feel consistent
+// with Settings/Add Game rather than like a separate color-tool bolted on.
+function buildColorGrid(entries, onActivate, activeHex) {
+  const outer = document.createElement('div');
+  outer.className = 'settings-grid-outer';
+  const grid = document.createElement('div');
+  grid.className = 'settings-grid';
+  const items = [];
+  entries.forEach((entry) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'tile-wrap';
+    const anchor = document.createElement('div');
+    anchor.className = 'tile-anchor';
+    const surface = document.createElement('div');
+    surface.className = 'tile-surface';
+
+    if (entry.kind === 'swatch') {
+      surface.style.background = entry.hex;
+      if (entry.hex.toLowerCase() === activeHex.toLowerCase()) {
+        const check = document.createElement('span');
+        check.className = 'color-swatch-check';
+        check.textContent = '✓';
+        surface.appendChild(check);
+      }
+    } else {
+      const span = document.createElement('span');
+      span.className = 'letter';
+      span.textContent = entry.kind === 'custom' ? '🎨' : '←';
+      surface.appendChild(span);
+    }
+    anchor.appendChild(surface);
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'bubble-name';
+    nameEl.textContent = entry.name;
+    const actionEl = document.createElement('div');
+    actionEl.className = 'bubble-action';
+    actionEl.textContent = entry.kind === 'back' ? 'Back' : 'Select';
+    bubble.append(nameEl, actionEl);
+    anchor.appendChild(bubble);
+
+    wrap.appendChild(anchor);
+    wrap.addEventListener('click', () => onActivate(entry));
+    grid.appendChild(wrap);
+    items.push({ el: wrap, activate: () => onActivate(entry) });
+  });
+  outer.appendChild(grid);
+  return { gridEl: outer, items };
+}
+
+// R/G/B fine-tuning for a single accent color, for when none of the
+// presets are quite right — same slider mechanics the old 3-tab screen
+// used, just scoped to one color instead of three independent ones.
+function showCustomColorModal(initialHex) {
+  return openModal((modal, close) => {
+    const h = document.createElement('h3');
+    h.textContent = 'Custom Accent Color';
+    const preview = document.createElement('div');
+    preview.className = 'color-preview';
+    const rowsWrap = document.createElement('div');
+    rowsWrap.className = 'color-rows';
+    const values = Theme.hexToRgb(initialHex);
+    let rowIndex = 0;
+
+    const rowEls = ['Red', 'Green', 'Blue'].map((label, i) => {
+      const row = document.createElement('div');
+      row.className = 'color-row';
+      const lbl = document.createElement('div');
+      lbl.className = 'color-row-label';
+      lbl.textContent = label;
+      const bar = document.createElement('div');
+      bar.className = 'color-bar';
+      const fill = document.createElement('div');
+      fill.className = 'color-bar-fill';
+      bar.appendChild(fill);
+      const value = document.createElement('div');
+      value.className = 'color-row-value';
+      row.append(lbl, bar, value);
+      rowsWrap.appendChild(row);
+
+      row.addEventListener('click', () => { rowIndex = i; refresh(); });
+      function setFromEvent(e) {
+        const rect = bar.getBoundingClientRect();
+        const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+        rowIndex = i;
+        values[i] = Math.round((x / rect.width) * 255);
+        refresh();
+      }
+      bar.addEventListener('mousedown', (e) => {
+        setFromEvent(e);
+        const onMove = (ev) => setFromEvent(ev);
+        const onUp = () => {
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+      return { row, fill, value };
+    });
+
+    const buttons = document.createElement('div');
+    buttons.className = 'modal-buttons';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.className = 'secondary';
+    const okBtn = document.createElement('button');
+    okBtn.textContent = 'Apply';
+    okBtn.className = 'primary';
+    buttons.append(cancelBtn, okBtn);
+    modal.append(h, preview, rowsWrap, buttons);
+
+    function refresh() {
+      preview.style.background = Theme.rgbToHex(values);
+      rowEls.forEach((r, i) => {
+        r.value.textContent = String(values[i]);
+        r.fill.style.width = `${(values[i] / 255) * 100}%`;
+        r.row.classList.toggle('focused', rowIndex === i);
+      });
+    }
+    refresh();
+
+    cancelBtn.onclick = () => close(null);
+    okBtn.onclick = () => close(Theme.rgbToHex(values));
+    modal.parentElement.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowUp') { rowIndex = (rowIndex - 1 + 3) % 3; refresh(); e.preventDefault(); }
+      else if (e.key === 'ArrowDown') { rowIndex = (rowIndex + 1) % 3; refresh(); e.preventDefault(); }
+      else if (e.key === 'ArrowLeft') { values[rowIndex] = Math.max(0, values[rowIndex] - 8); refresh(); e.preventDefault(); }
+      else if (e.key === 'ArrowRight') { values[rowIndex] = Math.min(255, values[rowIndex] + 8); refresh(); e.preventDefault(); }
+      else if (e.key === 'Enter') { close(Theme.rgbToHex(values)); e.preventDefault(); }
+      else if (e.key === 'Escape') { close(null); e.preventDefault(); }
+    });
+    // Without giving something in the modal real DOM focus, document.activeElement
+    // stays on <body> — every keydown (real keyboard AND the gamepad code's
+    // synthetic dispatch, which also targets document.activeElement) would
+    // then bubble up from body, never reaching this modal's own listener,
+    // since the backdrop is a descendant of body, not an ancestor.
+    setTimeout(() => okBtn.focus(), 0);
+  }, { hints: [{ key: '↑↓', label: 'Channel' }, { key: '←→', label: 'Adjust' }, { key: 'Enter', label: 'Apply' }, { key: 'Esc', label: 'Cancel' }] });
+}
+
 function renderColor(appEl) {
   const header = buildHeader();
   const body = document.createElement('div');
-  body.className = 'color-body';
+  body.className = 'subscreen-body';
   body.appendChild(buildScreenTitle('Menu Color'));
+  const subtitle = document.createElement('div');
+  subtitle.className = 'screen-subtitle';
+  subtitle.textContent = `Accent: ${state.themeColor} — glow and tiles match it automatically.`;
+  body.appendChild(subtitle);
 
-  const colorState = {
-    values: {
-      accent: Theme.hexToRgb(state.themeColor),
-      glow: Theme.hexToRgb(state.theme.glow),
-      tile: Theme.hexToRgb(state.theme.tile),
-    },
-    partIndex: 0,
-    rowIndex: 0, // 0 = part tabs, 1-3 = R/G/B, 4 = Apply, 5 = Back
-  };
-
-  const tabsRow = document.createElement('div');
-  tabsRow.className = 'color-tabs';
-  const tabEls = COLOR_PARTS.map(([, label], i) => {
-    const tab = document.createElement('div');
-    tab.className = 'color-tab';
-    tab.textContent = label;
-    tab.addEventListener('click', () => { colorState.partIndex = i; colorState.rowIndex = 0; refresh(); });
-    tabsRow.appendChild(tab);
-    return tab;
-  });
-
-  const preview = document.createElement('div');
-  preview.className = 'color-preview';
-
-  const rowsWrap = document.createElement('div');
-  rowsWrap.className = 'color-rows';
-  const rowEls = ['Red', 'Green', 'Blue'].map((label, i) => {
-    const row = document.createElement('div');
-    row.className = 'color-row';
-    const lbl = document.createElement('div');
-    lbl.className = 'color-row-label';
-    lbl.textContent = label;
-    const bar = document.createElement('div');
-    bar.className = 'color-bar';
-    const fill = document.createElement('div');
-    fill.className = 'color-bar-fill';
-    bar.appendChild(fill);
-    const value = document.createElement('div');
-    value.className = 'color-row-value';
-    row.append(lbl, bar, value);
-    rowsWrap.appendChild(row);
-
-    row.addEventListener('click', () => { colorState.rowIndex = i + 1; refresh(); });
-
-    function setFromEvent(e) {
-      const rect = bar.getBoundingClientRect();
-      const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
-      colorState.rowIndex = i + 1;
-      colorState.values[COLOR_PARTS[colorState.partIndex][0]][i] = Math.round((x / rect.width) * 255);
-      refresh();
-    }
-    bar.addEventListener('mousedown', (e) => {
-      setFromEvent(e);
-      const onMove = (ev) => setFromEvent(ev);
-      const onUp = () => {
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-      };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
-    });
-    return { row, fill, value };
-  });
-
-  const actions = document.createElement('div');
-  actions.className = 'color-actions';
-  const applyBtn = document.createElement('div');
-  applyBtn.className = 'color-action-btn';
-  applyBtn.textContent = 'Apply';
-  const backBtn = document.createElement('div');
-  backBtn.className = 'color-action-btn';
-  backBtn.textContent = 'Back';
-  applyBtn.addEventListener('click', () => { colorState.rowIndex = 4; applyColor(); });
-  backBtn.addEventListener('click', () => { ui.screen = 'settings'; render(); });
-  actions.append(applyBtn, backBtn);
-
-  body.append(tabsRow, preview, rowsWrap, actions);
-  appEl.append(header, body);
-
-  function refresh() {
-    const values = colorState.values[COLOR_PARTS[colorState.partIndex][0]];
-    preview.style.background = Theme.rgbToHex(values);
-
-    tabEls.forEach((tab, i) => {
-      const active = colorState.partIndex === i;
-      tab.classList.toggle('active', active);
-      tab.classList.toggle('focused', active && colorState.rowIndex === 0);
-    });
-    rowEls.forEach((r, i) => {
-      const v = values[i];
-      r.value.textContent = String(v);
-      r.fill.style.width = `${(v / 255) * 100}%`;
-      r.row.classList.toggle('focused', colorState.rowIndex === i + 1);
-    });
-    applyBtn.classList.toggle('focused', colorState.rowIndex === 4);
-    backBtn.classList.toggle('focused', colorState.rowIndex === 5);
-  }
-
-  async function applyColor() {
-    const accentHex = Theme.rgbToHex(colorState.values.accent);
-    const glowHex = Theme.rgbToHex(colorState.values.glow);
-    const tileHex = Theme.rgbToHex(colorState.values.tile);
-    const customColors = { glow: glowHex, tile: tileHex };
-    await window.api.saveSettings({ themeColor: accentHex, customColors });
-    state.themeColor = accentHex;
-    state.customColors = customColors;
-    state.theme = Theme.computeTheme(accentHex, customColors);
+  async function applyAccent(hex) {
+    await window.api.saveSettings({ themeColor: hex });
+    state.themeColor = hex;
+    state.theme = Theme.computeTheme(hex);
     applyTheme();
-    ui.screen = 'settings';
     render();
   }
 
-  currentKeyHandler = (e) => {
-    switch (e.key) {
-      case 'ArrowUp':
-        colorState.rowIndex = (colorState.rowIndex - 1 + 6) % 6;
-        refresh();
-        e.preventDefault();
-        break;
-      case 'ArrowDown':
-        colorState.rowIndex = (colorState.rowIndex + 1) % 6;
-        refresh();
-        e.preventDefault();
-        break;
-      case 'ArrowLeft':
-      case 'ArrowRight': {
-        const dir = e.key === 'ArrowLeft' ? -1 : 1;
-        if (colorState.rowIndex === 0) {
-          colorState.partIndex = (colorState.partIndex + dir + COLOR_PARTS.length) % COLOR_PARTS.length;
-        } else if (colorState.rowIndex >= 1 && colorState.rowIndex <= 3) {
-          const channel = colorState.rowIndex - 1;
-          const values = colorState.values[COLOR_PARTS[colorState.partIndex][0]];
-          values[channel] = Math.max(0, Math.min(255, values[channel] + dir * 8));
-        }
-        refresh();
-        e.preventDefault();
-        break;
-      }
-      case 'Enter':
-      case ' ':
-        if (colorState.rowIndex === 4) applyColor();
-        else if (colorState.rowIndex === 5) { ui.screen = 'settings'; render(); }
-        e.preventDefault();
-        break;
-      case 'Escape':
-        ui.screen = 'settings';
-        render();
-        e.preventDefault();
-        break;
-      default:
-        break;
+  async function activateColorEntry(entry) {
+    if (entry.kind === 'swatch') {
+      await applyAccent(entry.hex);
+    } else if (entry.kind === 'custom') {
+      const hex = await showCustomColorModal(state.themeColor);
+      if (hex) await applyAccent(hex);
+    } else if (entry.kind === 'back') {
+      ui.screen = 'settings';
+      render();
     }
-  };
+  }
 
-  refresh();
+  const entries = [
+    ...PRESET_ACCENTS.map(([hex, name]) => ({ kind: 'swatch', hex, name })),
+    { kind: 'custom', name: 'Custom Color' },
+    { kind: 'back', name: 'Back' },
+  ];
 
-  setHints([
-    { key: '↑↓', label: 'Row' },
-    { key: '←→', label: 'Adjust' },
-    { key: 'Enter', label: 'Select' },
-    { key: 'Esc', label: 'Back' },
-  ]);
+  const { gridEl, items } = buildColorGrid(entries, activateColorEntry, state.themeColor);
+  body.appendChild(gridEl);
+  appEl.append(header, body);
+
+  const goBack = () => { ui.screen = 'settings'; render(); };
+  const nav = create2DNav(items, countGridColumns(items), { onEscape: goBack });
+  currentKeyHandler = (e) => nav.handleKey(e);
+
+  setHints([{ key: '↑↓←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
 }
 
 /* ---------- init ---------- */
@@ -1398,15 +1750,15 @@ async function init() {
   state.apps = data.apps;
   state.user = data.user;
   state.themeColor = data.themeColor;
-  state.customColors = data.customColors;
   state.assetsDir = data.assetsDir;
   state.fontPath = data.fontPath;
   state.fontFamily = data.fontFamily;
   state.fontSize = data.fontSize;
+  state.customFonts = data.customFonts;
   state.timezone = data.timezone;
   state.timeFormat = data.timeFormat;
   state.timezones = data.timezones;
-  state.theme = Theme.computeTheme(state.themeColor, state.customColors);
+  state.theme = Theme.computeTheme(state.themeColor);
   applyTheme();
   if (state.fontPath && state.fontFamily) applyCustomFont(state.fontPath, state.fontFamily);
   applyFontSize(state.fontSize);

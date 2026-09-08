@@ -50,12 +50,34 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   animation: ambient-breathe 11s ease-in-out infinite;
 }
 
+/* A signature corner wash distinct from the ambient blobs above — built
+   from var(--accent) (Settings → Menu Color's "Menu Color" tab) rather
+   than var(--glow), so it's a second, independently themeable part of the
+   background: changing the accent shifts this corner without touching the
+   glow-colored blobs. Deliberately a WIDE gradual fade, not a thin ring —
+   .bg's own 38px blur filter (below) completely washes out anything
+   narrower than that, no matter how opaque, since blur radius bigger than
+   a feature just diffuses it to nothing. */
+.bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: radial-gradient(circle 60vmax at 100% 0%,
+    color-mix(in srgb, var(--accent) 85%, white 15%) 0%,
+    color-mix(in srgb, var(--accent) 65%, white 10%) 30%,
+    transparent 68%);
+  opacity: 0.8;
+  animation: ring-drift 16s ease-in-out infinite;
+}
+
 /* A faint slow-drifting light sweep across the sky, the way Media
    Center's Start background was never quite static. */
 .bg::after {
   content: '';
   position: absolute;
   inset: -20% -40%;
+  z-index: 2;
   background: linear-gradient(115deg, transparent 40%, rgba(255,255,255,0.06) 50%, transparent 60%);
   animation: light-sweep 14s linear infinite;
 }
@@ -63,6 +85,11 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 @keyframes ambient-breathe {
   0%, 100% { filter: blur(38px) saturate(1.1); }
   50% { filter: blur(44px) saturate(1.3); }
+}
+
+@keyframes ring-drift {
+  0%, 100% { transform: scale(1) rotate(0deg); opacity: 0.65; }
+  50% { transform: scale(1.06) rotate(1.5deg); opacity: 0.85; }
 }
 
 @keyframes light-sweep {
@@ -80,27 +107,50 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 
 /* Header */
 
+/* Aero-glass toolbar, the way Windows Media Center/WMP 12's title bar
+   reads as a lit glass strip rather than a flat panel — a glossy highlight
+   band over the top half, an accent-tinted gradient, and a hard dark seam
+   at the very bottom to separate it from the body. */
 .header {
   position: relative;
-  height: 75px;
+  height: clamp(52px, 8vh, 84px);
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
+  padding: 0 20px;
+  background: linear-gradient(to bottom,
+    color-mix(in srgb, var(--accent) 60%, white 28%) 0%,
+    color-mix(in srgb, var(--accent) 78%, black 6%) 55%,
+    color-mix(in srgb, var(--accent) 85%, black 28%) 100%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.55), 0 4px 16px rgba(0,0,0,0.4);
+}
+
+.header::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 46%;
+  background: linear-gradient(to bottom, rgba(255,255,255,0.4), rgba(255,255,255,0));
+  pointer-events: none;
 }
 
 .header::after {
   content: '';
   position: absolute;
-  left: 24px;
-  right: 24px;
+  left: 0;
+  right: 0;
   bottom: 0;
-  height: 1px;
-  background: linear-gradient(to right, transparent, rgba(255,255,255,0.18), transparent);
+  height: 2px;
+  background: linear-gradient(to right,
+    transparent, rgba(0,0,0,0.45) 15%, rgba(0,0,0,0.45) 85%, transparent);
 }
 
 .header-left, .header-right {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -109,8 +159,9 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 .clock {
   font-weight: 700;
   font-size: 15px;
-  color: var(--fg);
+  color: var(--accent-fg);
   letter-spacing: 0.5px;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.25);
 }
 
 /* Body */
@@ -157,7 +208,11 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   left: 0;
   right: 0;
   bottom: 0;
-  z-index: 3;
+  /* Above .modal-backdrop (z-index 20) — otherwise every modal (Quit
+     confirm included) covers the only on-screen cue for what Enter/Escape/
+     arrows actually do, so a keyboard/gamepad user has no way to tell the
+     dialog is navigable at all without already knowing the convention. */
+  z-index: 21;
   height: 40px;
   display: flex;
   align-items: center;
@@ -494,8 +549,26 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   transition: transform 0.12s ease, box-shadow 0.12s ease;
 }
 
-.modal-buttons button:hover {
+/* Every modal focuses some button purely so keydown events (real keyboard
+   and the gamepad code's synthetic dispatch, both targeting
+   document.activeElement) actually bubble into the modal's own listener —
+   not because that button's native focus ring should be the visible
+   indicator. .kbd-focus (or, for showCustomColorModal, .color-row.focused)
+   is the real one; suppress the native ring everywhere so a focused-but-
+   not-"kbd-focus" button (e.g. Apply in the custom color modal, focused
+   only to receive input while an R/G/B row is what's actually selected)
+   doesn't show a second, conflicting focus indicator. */
+.modal-buttons button:focus {
+  outline: none;
+}
+
+.modal-buttons button:hover, .modal-buttons button.kbd-focus {
   transform: translateY(-1px);
+}
+
+.modal-buttons button.kbd-focus {
+  outline: none;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), 0 0 0 2px var(--accent), 0 0 14px 2px var(--glow);
 }
 
 .modal-buttons button.secondary {
@@ -516,52 +589,24 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.5), 0 0 14px 2px var(--glow);
 }
 
-/* Menu color screen */
+/* Menu color screen — preset swatch grid (see buildColorGrid in
+   renderer.js) reuses .settings-grid/.tile-wrap; the rules below this
+   point are only the custom-color modal's R/G/B sliders. */
 
-.color-body {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  overflow: auto;
-  padding: 10px 50px 60px;
-}
-
-.color-tabs {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 16px;
-}
-
-.color-tab {
-  padding: 8px 16px;
-  border-radius: 8px;
-  cursor: pointer;
-  color: var(--fg);
-  border: 2px solid transparent;
-  font-size: 13px;
-  transition: background 0.15s ease, border-color 0.15s ease;
-}
-
-.color-tab.active {
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--accent) 80%, white 25%) 0%,
-    var(--accent) 55%,
-    color-mix(in srgb, var(--accent) 85%, black 20%) 100%);
-  color: var(--accent-fg);
-  font-weight: 600;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.4);
-}
-
-.color-tab.focused {
-  border-color: var(--fg);
+.color-swatch-check {
+  position: relative;
+  z-index: 1;
+  font-size: 40px;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.6);
 }
 
 .color-preview {
-  width: 140px;
-  height: 140px;
+  width: 100px;
+  height: 100px;
   border-radius: 10px;
-  margin-bottom: 22px;
+  margin: 4px auto 18px;
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,0.4),
     0 0 0 3px rgba(255,255,255,0.25),
@@ -620,35 +665,6 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   color: var(--fg);
 }
 
-.color-actions {
-  display: flex;
-  gap: 12px;
-  margin-top: 24px;
-}
-
-.color-action-btn {
-  padding: 10px 22px;
-  border-radius: 8px;
-  border: 2px solid transparent;
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--tile) 78%, white 16%) 0%,
-    var(--tile) 45%,
-    color-mix(in srgb, var(--tile) 85%, black 20%) 100%);
-  color: var(--tile-fg);
-  cursor: pointer;
-  font-size: 14px;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.35);
-  transition: border-color 0.15s ease, transform 0.12s ease;
-}
-
-.color-action-btn:hover {
-  transform: translateY(-1px);
-}
-
-.color-action-btn.focused {
-  border-color: var(--accent);
-}
-
 /* Scrollbars: thin, theme-tinted */
 
 ::-webkit-scrollbar { height: 10px; width: 10px; }
@@ -658,8 +674,8 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 /* Header player icon + name (click to open Update Player) */
 
 .header-player-icon {
-  width: 40px;
-  height: 40px;
+  width: clamp(30px, 5vh, 52px);
+  height: clamp(30px, 5vh, 52px);
   border-radius: 50%;
   overflow: hidden;
   background: var(--tile);
@@ -671,20 +687,79 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   color: var(--tile-fg);
   border: 1px solid color-mix(in srgb, white 30%, transparent);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.3);
+  cursor: pointer;
+  transition: box-shadow 0.15s ease;
 }
+
+.header-player-icon:hover { box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), 0 0 0 2px rgba(255,255,255,0.5); }
 
 .header-player-icon img { width: 100%; height: 100%; object-fit: cover; }
 
-.header-player-name { font-weight: 600; font-size: 14px; color: var(--fg); }
+/* Boxed like the wireframe's username field — still just a label (Update
+   Player is a full screen, not an inline edit), but reads as a
+   clickable control instead of plain text. */
+.header-player-box {
+  padding: 6px 16px;
+  border-radius: 8px;
+  background: rgba(0,0,0,0.18);
+  border: 1px solid color-mix(in srgb, white 30%, transparent);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.header-player-box:hover { background: rgba(0,0,0,0.28); border-color: rgba(255,255,255,0.55); }
+
+.header-player-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--accent-fg);
+  text-shadow: 0 1px 2px rgba(0,0,0,0.25);
+}
+
+/* Settings gear / Power icon buttons — mouse convenience mirroring the
+   sidebar's Settings/Quit entries (see buildHeader's comment). */
+.header-icon-btn {
+  width: clamp(30px, 5vh, 48px);
+  height: clamp(30px, 5vh, 48px);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  cursor: pointer;
+  background: rgba(0,0,0,0.18);
+  border: 1px solid color-mix(in srgb, white 30%, transparent);
+  color: var(--accent-fg);
+  transition: background 0.15s ease, transform 0.12s ease;
+}
+
+.header-icon-btn:hover { background: rgba(0,0,0,0.3); transform: translateY(-1px); }
+
+.header-power-btn {
+  background: linear-gradient(to bottom, #e0473f 0%, #c62f28 55%, #a5211b 100%);
+  border-color: rgba(255,255,255,0.4);
+  color: #ffffff;
+}
+
+.header-power-btn:hover { box-shadow: 0 0 12px 2px rgba(224,71,63,0.7); }
 
 /* Games: vertical list */
 
+/* Library nav pane — a distinct frosted glass panel bounded from the
+   detail view, the way WMP's Library tree sits in its own strip rather
+   than floating on the same surface as the content it describes. */
 .game-list-outer {
-  flex: 1;
-  max-width: 480px;
+  flex: 0 0 clamp(200px, 22vw, 400px);
+  max-width: clamp(200px, 22vw, 400px);
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 20px 20px 20px 30px;
+  padding: 18px 12px 20px;
+  background: linear-gradient(to bottom,
+    color-mix(in srgb, var(--tile) 60%, transparent) 0%,
+    color-mix(in srgb, var(--tile) 30%, transparent) 100%);
+  backdrop-filter: blur(20px) saturate(1.3);
+  border-right: 1px solid color-mix(in srgb, white 16%, transparent);
+  box-shadow: inset -1px 0 0 rgba(0,0,0,0.3), 6px 0 24px rgba(0,0,0,0.25);
 }
 
 .game-list {
@@ -712,9 +787,25 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 
 .game-row:hover, .game-row.kbd-focus {
   background: color-mix(in srgb, var(--tile) 55%, transparent);
-  border-color: var(--accent);
+  border-color: color-mix(in srgb, white 30%, transparent);
   transform: translateX(4px);
 }
+
+/* Persistent Aero-glass selection pill — the currently previewed game
+   stays highlighted even after the pointer leaves, like the highlighted
+   row in Steam's library list or WMP's now-playing item. */
+.game-row.selected {
+  background: linear-gradient(to bottom,
+    color-mix(in srgb, var(--accent) 55%, white 22%) 0%,
+    color-mix(in srgb, var(--accent) 75%, black 8%) 100%);
+  border-color: color-mix(in srgb, white 45%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.5),
+    0 4px 14px rgba(0,0,0,0.35),
+    0 0 18px 2px var(--glow);
+}
+
+.game-row.selected .game-row-name { color: var(--accent-fg); font-weight: 700; }
 
 .game-row-thumb {
   position: relative;
@@ -734,7 +825,16 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 .game-row-thumb .icon-img { width: 32px; height: 32px; object-fit: contain; }
 .game-row-thumb .letter { font-size: 20px; font-weight: 600; color: var(--tile-fg); }
 
-.game-row-name { font-size: 16px; font-weight: 600; color: var(--fg); }
+.game-row-name {
+  min-width: 0;
+  flex: 1;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .game-row-settings {
   margin-top: 14px;
@@ -752,70 +852,68 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 
 .settings-grid {
   display: grid;
-  grid-template-columns: repeat(4, 210px);
+  /* Wraps to however many 210px columns actually fit the window instead of
+     a fixed 4 — countGridColumns() in renderer.js measures the result so
+     keyboard/gamepad nav always matches what's on screen. */
+  grid-template-columns: repeat(auto-fill, minmax(170px, 210px));
   column-gap: 26px;
   row-gap: 90px;
   padding: 80px 20px 30px;
   justify-content: start;
 }
 
-/* Game detail / Play screen */
+/* Game detail pane — a Steam-library-style hero: the banner is the
+   backdrop, the icon badge overlaps its bottom-left corner, and the
+   title sits in the scrim next to it, instead of icon/banner as two
+   separate boxes side by side. */
 
-.detail-body {
+.detail-pane {
   flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 22px 28px 30px;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
-  padding: 20px 30px 46px;
-  gap: 16px;
+  gap: 18px;
 }
 
-.detail-top {
+/* Icon + banner as their own side-by-side boxes (icon left, banner right),
+   per the app's wireframe — not a single hero with the icon overlapping
+   the banner's corner. */
+
+.detail-top-row {
   display: flex;
-  gap: 20px;
+  gap: 18px;
+  flex: 0 0 auto;
+  width: 100%;
+  height: clamp(140px, 30vh, 320px);
 }
 
-.detail-icon-box {
-  flex: 0 0 140px;
-  height: 140px;
-  border-radius: 14px;
+.detail-icon-box, .detail-banner-box {
+  border-radius: 16px;
+  overflow: hidden;
   background: linear-gradient(to bottom,
     color-mix(in srgb, var(--tile) 78%, white 16%) 0%,
     var(--tile) 42%,
     color-mix(in srgb, var(--tile) 85%, black 22%) 100%);
-  border: 1px solid color-mix(in srgb, white 30%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.4), 0 5px 10px rgba(0,0,0,0.4);
+  border: 1px solid color-mix(in srgb, white 25%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.35), 0 10px 30px rgba(0,0,0,0.45);
   display: flex;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
 }
 
-.detail-icon-box img { width: 80%; height: 80%; object-fit: contain; }
-.detail-icon-box .letter { font-size: 48px; font-weight: 600; color: var(--tile-fg); }
-
-.detail-banner-col {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+.detail-icon-box {
+  flex: 0 0 clamp(140px, 30vh, 320px);
+  width: clamp(140px, 30vh, 320px);
 }
+
+.detail-icon-box img { width: 100%; height: 100%; object-fit: cover; }
+.detail-icon-box .letter { font-size: 56px; font-weight: 700; color: var(--tile-fg); }
 
 .detail-banner-box {
-  height: 140px;
-  border-radius: 14px;
-  background: var(--tile);
-  border: 1px solid color-mix(in srgb, white 25%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), 0 5px 10px rgba(0,0,0,0.4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  color: var(--dim-fg);
-  font-size: 13px;
-  text-align: center;
-  padding: 0 16px;
+  flex: 1;
+  min-width: 0;
 }
 
 .detail-banner-box img { width: 100%; height: 100%; object-fit: cover; }
@@ -825,42 +923,21 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   align-items: baseline;
   justify-content: space-between;
   gap: 16px;
+  flex: 0 0 auto;
 }
 
 .detail-title {
-  font-size: 26px;
+  font-size: clamp(18px, 2.6vw, 36px);
   font-weight: 700;
   color: var(--fg);
-  text-shadow: 0 0 14px var(--accent);
 }
 
-.detail-playtime { font-size: 14px; color: var(--dim-fg); white-space: nowrap; }
-
-.detail-description {
-  background: color-mix(in srgb, var(--tile) 55%, transparent);
-  border-radius: 12px;
-  padding: 16px 18px;
-  font-size: 14px;
-  line-height: 1.5;
-  color: var(--fg);
-  min-height: 70px;
-  white-space: pre-wrap;
+.detail-playtime {
+  font-size: 13px;
+  color: var(--dim-fg);
+  white-space: nowrap;
 }
 
-.detail-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.tag-chip {
-  padding: 5px 12px;
-  border-radius: 14px;
-  background: var(--tile-overlay);
-  border: 1px solid color-mix(in srgb, white 20%, transparent);
-  font-size: 12px;
-  color: var(--fg);
-}
 
 .detail-actions {
   display: flex;
@@ -962,6 +1039,9 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 }
 
 .timezone-row {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
   padding: 10px 16px;
   border-radius: 8px;
   font-size: 14px;
@@ -976,6 +1056,30 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 .timezone-row.active {
   background: color-mix(in srgb, var(--accent) 35%, var(--tile));
   font-weight: 600;
+}
+
+.timezone-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.timezone-row-clock {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+
+.timezone-row-diff {
+  flex: 0 0 auto;
+  min-width: 74px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--dim-fg);
+}
+
+.timezone-row.active .timezone-row-diff { color: var(--accent-fg); }
+
+.screen-subtitle {
+  font-size: 13px;
+  color: var(--dim-fg);
+  margin: -8px 0 16px 10px;
 }
 
 .modal textarea {
