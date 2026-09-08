@@ -35,8 +35,17 @@ function joinPath(...parts) {
   return parts.join('/').replace(/\/+/g, '/');
 }
 
+// Every icon/banner/font path from main.js is a native OS path — on
+// Windows that's backslash-separated and drive-lettered (e.g.
+// "C:\Users\Name\...\icon.png"), which 'file://' + encodeURI(p) turns
+// into an unparseable URL (backslashes get percent-encoded instead of
+// treated as separators, and there's no leading slash before the drive
+// letter for the required file:///C:/... form). Mac/Linux paths already
+// start with '/', so this is a no-op there — only Windows was broken.
 function fileUrl(p) {
-  return 'file://' + encodeURI(p);
+  let pathName = p.replace(/\\/g, '/');
+  if (!pathName.startsWith('/')) pathName = '/' + pathName;
+  return 'file://' + encodeURI(pathName);
 }
 
 function formatClock(tz) {
