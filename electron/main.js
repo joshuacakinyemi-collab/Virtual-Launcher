@@ -89,8 +89,10 @@ function loadApps() {
       iconPath: item.icon_path || null,
       // banner_path is the current field name; art_path is read for
       // backward compatibility with apps.json files saved before the
-      // icon/banner split.
+      // icon/banner split. grid_path is separate from both — SteamGridDB's
+      // own "Grid" cover art, distinct from the wide banner (Hero) image.
       bannerPath: item.banner_path || item.art_path || null,
+      gridPath: item.grid_path || null,
       playtimeSeconds: Number.isFinite(item.playtime_seconds) ? item.playtime_seconds : 0,
       slug: slugFor(item.path || ''),
     }));
@@ -106,6 +108,7 @@ function saveApps(apps) {
       path: a.path,
       icon_path: a.iconPath || null,
       banner_path: a.bannerPath || null,
+      grid_path: a.gridPath || null,
       playtime_seconds: a.playtimeSeconds || 0,
     })),
   };
@@ -154,7 +157,13 @@ function loadSettings() {
   const data = loadRawSettings();
   const themeColor = data.theme_color || DEFAULT_THEME_COLOR;
   let customFonts = Array.isArray(data.custom_fonts)
-    ? data.custom_fonts.filter((f) => f && typeof f.fileName === 'string' && typeof f.displayName === 'string')
+    ? data.custom_fonts
+      .filter((f) => f && typeof f.fileName === 'string' && typeof f.displayName === 'string')
+      // Each font remembers its own scale — different font files render at
+      // very different apparent sizes for the same CSS font-size (their
+      // own internal glyph proportions differ), so one global size setting
+      // can never make every imported font look right at once.
+      .map((f) => ({ ...f, scale: Number.isFinite(f.scale) ? Math.max(0.7, Math.min(2, f.scale)) : 1 }))
     : [];
   const fontPath = typeof data.font_path === 'string' ? data.font_path : null;
 
@@ -183,24 +192,28 @@ function loadSettings() {
     customFonts,
     timezone: typeof data.timezone === 'string' ? data.timezone : null,
     timeFormat: data.time_format === '12h' ? '12h' : '24h',
+    showSeconds: data.show_seconds === true,
+    themeMode: data.theme_mode === 'light' ? 'light' : 'dark',
   };
 }
 
 // A single accent color is the only thing a user sets directly — glow/tile
 // are always derived from it (Theme.computeTheme in the renderer), so the
 // palette can't drift into a mismatched combination the way independently
-// overriding glow/tile used to allow.
-function saveSettings(themeColor) {
-  writeRawSettings({ theme_color: themeColor });
+// overriding glow/tile used to allow. themeMode (dark/light) picks which
+// neutral base that derivation starts from.
+function saveSettings(themeColor, themeMode) {
+  writeRawSettings({ theme_color: themeColor, theme_mode: themeMode === 'light' ? 'light' : 'dark' });
 }
 
-function saveDisplaySettings({ fontPath, fontFamily, fontSize, timezone, timeFormat }) {
+function saveDisplaySettings({ fontPath, fontFamily, fontSize, timezone, timeFormat, showSeconds }) {
   writeRawSettings({
     font_path: fontPath || null,
     font_family: fontFamily || null,
     font_size: fontSize || 'medium',
     timezone: timezone || null,
     time_format: timeFormat === '12h' ? '12h' : '24h',
+    show_seconds: showSeconds === true,
   });
 }
 
@@ -298,6 +311,10 @@ function extractAppIconWindows(exePath) {
 }
 
 function createWindow() {
+  // Matches the theme mode's own base tone so the window's native
+  // background (visible for a frame before the page paints) doesn't flash
+  // black-then-white on a light-mode profile.
+  const startupBg = loadSettings().themeMode === 'light' ? '#eef1f6' : '#000000';
   mainWindow = new BrowserWindow({
     width: WINDOW_W,
     height: WINDOW_H,
@@ -307,7 +324,7 @@ function createWindow() {
     resizable: true,
     fullscreen: true,
     icon: APP_ICON_PATH,
-    backgroundColor: '#000000',
+    backgroundColor: startupBg,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -346,17 +363,19 @@ app.on('window-all-closed', () => {
 });
 
 ipcMain.handle('get-state', () => {
-  const { themeColor, fontPath, fontFamily, fontSize, customFonts, timezone, timeFormat } = loadSettings();
+  const { themeColor, themeMode, fontPath, fontFamily, fontSize, customFonts, timezone, timeFormat, showSeconds } = loadSettings();
   return {
     apps: loadApps(),
     user: loadUser(),
     themeColor,
+    themeMode,
     fontPath,
     fontFamily,
     fontSize,
     customFonts,
     timezone,
     timeFormat,
+    showSeconds,
     timezones: TIMEZONES,
     assetsDir: ASSETS_DIR,
   };
@@ -449,6 +468,17 @@ ipcMain.handle('select-font', (_event, fileName) => {
   return loadSettings();
 });
 
+// Updates one font's own remembered scale (0.7-2.0) — not a global
+// setting, since different font files need different scales to look
+// consistent with the rest of the UI at the same nominal text size.
+ipcMain.handle('set-font-scale', (_event, { fileName, scale }) => {
+  const settings = loadSettings();
+  const clamped = Math.max(0.7, Math.min(2, Number(scale) || 1));
+  const customFonts = settings.customFonts.map((f) => (f.fileName === fileName ? { ...f, scale: clamped } : f));
+  writeRawSettings({ custom_fonts: customFonts });
+  return loadSettings();
+});
+
 // Removes a stored font (the file and its entry in custom_fonts). If it
 // was the active one, falls back to the default font.
 ipcMain.handle('remove-font', (_event, fileName) => {
@@ -467,27 +497,28 @@ ipcMain.handle('remove-font', (_event, fileName) => {
   return loadSettings();
 });
 
-ipcMain.handle('add-app', (_event, { name, path: appPath, iconPath, bannerPath }) => {
+ipcMain.handle('add-app', (_event, { name, path: appPath, iconPath, bannerPath, gridPath }) => {
   const apps = loadApps();
   // An explicitly picked icon (SteamGridDB search or a local file, chosen
   // during Add Game) wins; otherwise fall back to OS icon extraction, same
   // as before this had its own icon-picking step.
   const resolvedIconPath = iconPath || extractAppIcon(appPath);
   apps.push({
-    name, path: appPath, iconPath: resolvedIconPath, bannerPath: bannerPath || null,
+    name, path: appPath, iconPath: resolvedIconPath, bannerPath: bannerPath || null, gridPath: gridPath || null,
     playtimeSeconds: 0, slug: slugFor(appPath),
   });
   saveApps(apps);
   return loadApps();
 });
 
-ipcMain.handle('update-app', (_event, { slug, name, iconPath, bannerPath }) => {
+ipcMain.handle('update-app', (_event, { slug, name, iconPath, bannerPath, gridPath }) => {
   const apps = loadApps();
   const entry = apps.find((a) => a.slug === slug);
   if (!entry) return loadApps();
   if (typeof name === 'string' && name) entry.name = name;
   if (iconPath !== undefined) entry.iconPath = iconPath;
   if (bannerPath !== undefined) entry.bannerPath = bannerPath;
+  if (gridPath !== undefined) entry.gridPath = gridPath;
   saveApps(apps);
   return loadApps();
 });
@@ -496,7 +527,7 @@ ipcMain.handle('remove-app', (_event, slug) => {
   const apps = loadApps();
   const entry = apps.find((a) => a.slug === slug);
   const remaining = apps.filter((a) => a.slug !== slug);
-  for (const cachedPath of [entry?.iconPath, entry?.bannerPath]) {
+  for (const cachedPath of [entry?.iconPath, entry?.bannerPath, entry?.gridPath]) {
     if (cachedPath && path.dirname(cachedPath) === iconCacheDir()) {
       try {
         fs.unlinkSync(cachedPath);
@@ -509,8 +540,8 @@ ipcMain.handle('remove-app', (_event, slug) => {
   return loadApps();
 });
 
-ipcMain.handle('save-settings', (_event, { themeColor }) => {
-  saveSettings(themeColor);
+ipcMain.handle('save-settings', (_event, { themeColor, themeMode }) => {
+  saveSettings(themeColor, themeMode);
   return true;
 });
 
@@ -594,6 +625,11 @@ ipcMain.handle('steamgriddb-search', async (_event, term) => {
   }
 });
 
+// SteamGridDB's actual "Grid" asset — Steam's own library cover art
+// (traditionally the tall 600x900 capsule, though some games also have
+// landscape-style grids). This is its own distinct picture now (not a
+// stand-in for the banner), so no dimension bias — offer whatever SteamGridDB
+// actually has.
 ipcMain.handle('steamgriddb-grids', async (_event, gameId) => {
   const key = loadSteamGridDbKey();
   if (!key) return { ok: false, error: 'No SteamGridDB API key set.' };
@@ -602,7 +638,7 @@ ipcMain.handle('steamgriddb-grids', async (_event, gameId) => {
       headers: { Authorization: `Bearer ${key}` },
     });
     const json = await res.json();
-    if (!res.ok || !json.success) return { ok: false, error: 'Could not fetch SteamGridDB art.' };
+    if (!res.ok || !json.success) return { ok: false, error: 'Could not fetch SteamGridDB grid art.' };
     return { ok: true, grids: (json.data || []).slice(0, 9).map((g) => ({ id: g.id, url: g.url, thumb: g.thumb })) };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -624,16 +660,44 @@ ipcMain.handle('steamgriddb-icons', async (_event, gameId) => {
   }
 });
 
+// SteamGridDB's "Hero" asset — their actual wide-banner category
+// (~1920x620), the dedicated source for the banner slot now that Grid is
+// its own separate picture instead of standing in for it.
+ipcMain.handle('steamgriddb-heroes', async (_event, gameId) => {
+  const key = loadSteamGridDbKey();
+  if (!key) return { ok: false, error: 'No SteamGridDB API key set.' };
+  try {
+    const res = await fetch(`${STEAMGRIDDB_BASE}/heroes/game/${gameId}`, {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    const json = await res.json();
+    if (!res.ok || !json.success) return { ok: false, error: 'Could not fetch SteamGridDB banner art.' };
+    return { ok: true, grids: (json.data || []).slice(0, 9).map((g) => ({ id: g.id, url: g.url, thumb: g.thumb })) };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// destPath is deterministic per (appPath, kind), so it gets overwritten on
+// every pick — this only tracks which URL last wrote each destPath, so
+// re-picking the exact same art (e.g. reopening the picker after cancelling)
+// skips the network fetch instead of re-downloading bytes already on disk.
+const downloadedUrlByPath = new Map();
+
 ipcMain.handle('steamgriddb-download', async (_event, { url, appPath, kind }) => {
   try {
+    const ext = (url.split('.').pop() || 'png').split('?')[0].slice(0, 4);
+    const suffix = kind === 'icon' ? 'icon' : kind === 'grid' ? 'grid' : 'banner';
+    const destPath = path.join(iconCacheDir(), `${slugFor(appPath)}_${suffix}.${ext}`);
+    if (downloadedUrlByPath.get(destPath) === url && fs.existsSync(destPath)) {
+      return { ok: true, path: destPath };
+    }
     const res = await fetch(url);
     if (!res.ok) return { ok: false, error: `Download failed (${res.status})` };
     const buf = Buffer.from(await res.arrayBuffer());
     fs.mkdirSync(iconCacheDir(), { recursive: true });
-    const ext = (url.split('.').pop() || 'png').split('?')[0].slice(0, 4);
-    const suffix = kind === 'icon' ? 'icon' : 'banner';
-    const destPath = path.join(iconCacheDir(), `${slugFor(appPath)}_${suffix}.${ext}`);
     fs.writeFileSync(destPath, buf);
+    downloadedUrlByPath.set(destPath, url);
     return { ok: true, path: destPath };
   } catch (e) {
     return { ok: false, error: e.message };

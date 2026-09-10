@@ -11,9 +11,16 @@ html, body {
 
 /* Size presets (Settings → Change Font) scale the whole page uniformly,
    including the fixed-position background and footer, rather than
-   converting every font-size in this file to relative units. */
-html[data-ui-size="small"] body { zoom: 0.85; }
-html[data-ui-size="large"] body { zoom: 1.15; }
+   converting every font-size in this file to relative units.
+   --font-scale (set per active custom font — see applyCustomFontScale in
+   renderer.js) multiplies on top of the size preset: different font files
+   render at very different apparent sizes for the same nominal font-size,
+   so a single Small/Medium/Large setting can't make every imported font
+   look right — each one remembers its own extra scale factor instead. */
+:root { --ui-size-zoom: 1; --font-scale: 1; }
+html[data-ui-size="small"] { --ui-size-zoom: 0.85; }
+html[data-ui-size="large"] { --ui-size-zoom: 1.15; }
+body { zoom: calc(var(--ui-size-zoom) * var(--font-scale)); }
 
 :root {
   --bg: #0a0e14;
@@ -100,7 +107,18 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 #app {
   position: relative;
   z-index: 1;
-  height: 100vh;
+  /* Not 100vh: body has `zoom` applied (Text Size / font scale), and vh is
+     measured against the true un-zoomed viewport — so a 100vh element
+     then renders zoom% *larger* than the real viewport once zoom scales
+     it, silently overflowing the bottom by exactly that excess (e.g. 15%
+     of the window height at the "Large" text size). That overflow was
+     invisible in a screen's normal state but became a real bug the
+     moment any screen needed to scroll: the scrollable content's own
+     bottom edge extended past the true viewport, behind the fixed footer
+     hint bar, instead of stopping short of it. 100% (matching html/body's
+     own height:100% one level up) scales consistently under zoom instead.
+  */
+  height: 100%;
   display: flex;
   flex-direction: column;
 }
@@ -213,7 +231,7 @@ html[data-ui-size="large"] body { zoom: 1.15; }
      arrows actually do, so a keyboard/gamepad user has no way to tell the
      dialog is navigable at all without already knowing the convention. */
   z-index: 21;
-  height: 40px;
+  min-height: 40px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -237,8 +255,8 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   align-items: center;
   justify-content: center;
   min-width: 20px;
-  height: 20px;
-  padding: 0 6px;
+  min-height: 20px;
+  padding: 2px 6px;
   border-radius: 5px;
   background: linear-gradient(to bottom, rgba(255,255,255,0.22), rgba(255,255,255,0.06));
   border: 1px solid rgba(255,255,255,0.28);
@@ -259,15 +277,28 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   display: flex;
   align-items: flex-end;
   gap: 26px;
-  padding: 80px 10px 14px;
+  /* Top padding exists only to clear the bubble tooltip that pops up above
+     a focused tile — clamp() shrinks it (and the tile itself, in ancestor
+     rules) on short windows instead of eating a fixed 80px regardless of
+     how little vertical space there actually is. */
+  padding: clamp(40px, 11vh, 80px) 10px 14px;
   width: max-content;
 }
 
-/* Tiles */
-
+/* Tiles — sizes below are responsive (clamp, not fixed px): fixed 184x210
+   tiles with 80px/90px of bubble-clearance padding around them meant the
+   Settings grid barely fit one row before requiring scroll on anything
+   smaller than a full-size desktop window (confirmed down to one row
+   visible, footer hints overlapping the tiles, at the app's own 640x420
+   minimum size). --tile-grow-w/h (defined here, referenced by the hover/
+   focus rule below) keep the "grows on focus" delta proportional to
+   whatever the resting size resolves to at the current viewport, instead
+   of jumping to another unrelated fixed size. */
 .tile-wrap {
   position: relative;
-  width: 210px;
+  width: clamp(125px, 19.5vw, 210px);
+  --tile-grow-w: clamp(125px, 19.5vw, 210px);
+  --tile-grow-h: clamp(91px, 15vh, 158px);
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -281,8 +312,8 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 
 .tile-surface {
   position: relative;
-  width: 184px;
-  height: 138px;
+  width: clamp(110px, 17.5vw, 184px);
+  height: clamp(80px, 13.5vh, 138px);
   margin: 0 auto;
   border-radius: 12px;
   background: linear-gradient(to bottom,
@@ -315,8 +346,8 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 }
 
 .tile-surface .icon-img {
-  width: 68px;
-  height: 68px;
+  width: clamp(46px, 9.5vh, 68px);
+  height: clamp(46px, 9.5vh, 68px);
   object-fit: contain;
   position: relative;
   z-index: 1;
@@ -324,35 +355,18 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   transition: width 0.18s ease, height 0.18s ease;
 }
 
-/* Full-bleed SteamGridDB cover art, instead of a small centered icon on the
-   tile's own glass color — sits under the gloss highlight (z-index 2) so
-   the glass sheen still reads on top of the artwork. */
-.tile-surface .art-cover {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  z-index: 0;
-  transition: transform 0.18s ease;
-}
-
-.tile-wrap:hover .tile-surface .art-cover, .tile-wrap.kbd-focus .tile-surface .art-cover {
-  transform: scale(1.04);
-}
-
 .tile-surface .letter {
   position: relative;
   z-index: 1;
-  font-size: 40px;
+  font-size: clamp(26px, 5.5vh, 40px);
   font-weight: 600;
   color: var(--tile-fg);
   text-shadow: 0 1px 2px rgba(0,0,0,0.4);
 }
 
 .tile-wrap:hover .tile-surface, .tile-wrap.kbd-focus .tile-surface {
-  width: 210px;
-  height: 158px;
+  width: var(--tile-grow-w);
+  height: var(--tile-grow-h);
   transform: translateY(-3px);
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,0.55),
@@ -363,12 +377,12 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 }
 
 .tile-wrap:hover .tile-surface .icon-img, .tile-wrap.kbd-focus .tile-surface .icon-img {
-  width: 82px;
-  height: 82px;
+  width: clamp(55px, 11.5vh, 82px);
+  height: clamp(55px, 11.5vh, 82px);
 }
 
 .tile-wrap:hover .tile-surface .letter, .tile-wrap.kbd-focus .tile-surface .letter {
-  font-size: 50px;
+  font-size: clamp(32px, 6.8vh, 50px);
 }
 
 /* Bubble tooltip */
@@ -517,6 +531,7 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   padding-right: 4px;
 }
 
+/* Default (Grid): SteamGridDB's own tall capsule shape. */
 .art-thumb {
   width: 100%;
   aspect-ratio: 2 / 3;
@@ -525,6 +540,23 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   cursor: pointer;
   border: 2px solid transparent;
   transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+/* Icon: square — was previously referenced in renderer.js with no matching
+   rule here, so icon options were silently rendered squashed into the
+   Grid thumb's 2:3 box instead of their actual square shape. */
+.art-thumb-icon {
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+}
+
+/* Banner: SteamGridDB's wide Hero shape — spans the full picker width as
+   one row instead of being squeezed into a 2:3 grid cell (see the matching
+   1-column nav for this kind in showArtPicker). */
+.art-thumb-banner {
+  aspect-ratio: 920 / 430;
+  object-fit: cover;
+  grid-column: 1 / -1;
 }
 
 .art-thumb:hover, .art-thumb.kbd-focus {
@@ -593,13 +625,23 @@ html[data-ui-size="large"] body { zoom: 1.15; }
    renderer.js) reuses .settings-grid/.tile-wrap; the rules below this
    point are only the custom-color modal's R/G/B sliders. */
 
+/* color set inline per-swatch (buildColorGrid, renderer.js) via
+   Theme.readableFg(entry.hex) — a fixed color here would go unreadable
+   against light presets like Golden Yellow. */
 .color-swatch-check {
   position: relative;
   z-index: 1;
   font-size: 40px;
   font-weight: 700;
-  color: #fff;
   text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+}
+
+.mode-tile-check {
+  position: relative;
+  z-index: 1;
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--tile-fg);
 }
 
 .color-preview {
@@ -821,8 +863,7 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), 0 2px 6px rgba(0,0,0,0.35);
 }
 
-.game-row-thumb .art-cover { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.game-row-thumb .icon-img { width: 32px; height: 32px; object-fit: contain; }
+.game-row-thumb .icon-img { width: 40px; height: 40px; object-fit: contain; }
 .game-row-thumb .letter { font-size: 20px; font-weight: 600; color: var(--tile-fg); }
 
 .game-row-name {
@@ -852,13 +893,23 @@ html[data-ui-size="large"] body { zoom: 1.15; }
 
 .settings-grid {
   display: grid;
-  /* Wraps to however many 210px columns actually fit the window instead of
-     a fixed 4 — countGridColumns() in renderer.js measures the result so
-     keyboard/gamepad nav always matches what's on screen. */
-  grid-template-columns: repeat(auto-fill, minmax(170px, 210px));
+  /* Wraps to however many columns actually fit the window instead of a
+     fixed 4 — countGridColumns() in renderer.js measures the result so
+     keyboard/gamepad nav always matches what's on screen. The 125px floor
+     matches .tile-wrap's own responsive minimum (clamp(125px, 19.5vw,
+     210px)) so a narrow window actually gets more, smaller columns instead
+     of the track staying pinned at the old fixed 170px minimum while the
+     tile inside it shrank — that combination was real dead space, not
+     more content fitting. */
+  grid-template-columns: repeat(auto-fill, minmax(125px, 210px));
   column-gap: 26px;
-  row-gap: 90px;
-  padding: 80px 20px 30px;
+  /* Row gap and top padding exist only to clear the bubble tooltip above a
+     focused tile — both shrink on short windows instead of a fixed 80px/
+     90px regardless of how little vertical room there is. That fixed
+     amount was the main reason the grid needed scrolling almost
+     immediately on anything smaller than a full desktop window. */
+  row-gap: clamp(50px, 11vh, 90px);
+  padding: clamp(40px, 11vh, 80px) 20px 30px;
   justify-content: start;
 }
 
@@ -877,7 +928,7 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   gap: 18px;
 }
 
-/* Icon + banner as their own side-by-side boxes (icon left, banner right),
+/* Grid + banner as their own side-by-side boxes (grid left, banner right),
    per the app's wireframe — not a single hero with the icon overlapping
    the banner's corner. */
 
@@ -889,7 +940,7 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   height: clamp(140px, 30vh, 320px);
 }
 
-.detail-icon-box, .detail-banner-box {
+.detail-grid-box, .detail-banner-box {
   border-radius: 16px;
   overflow: hidden;
   background: linear-gradient(to bottom,
@@ -903,20 +954,47 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   justify-content: center;
 }
 
-.detail-icon-box {
-  flex: 0 0 clamp(140px, 30vh, 320px);
-  width: clamp(140px, 30vh, 320px);
+/* Sized to SteamGridDB's own Grid shape (600x900 portrait capsule) instead
+   of a square — a square box pillarboxed every portrait grid with ~50px of
+   empty padding on each side. No padding, so the art sits flush against the
+   box edge like the banner instead of behind a thick matte. height: 100% is
+   just the pre-layout fallback — renderer.js overwrites it (inline style)
+   to match the banner box's real rendered height, since the two boxes'
+   fixed aspect ratios naturally compute different heights at a shared row
+   height. align-self: center matches the banner box below: with the row
+   still taller than either box, "auto" (this box's default) would anchor
+   it to the row's top while the banner stayed centered, so their matching
+   heights would sit at different vertical offsets instead of lining up. */
+.detail-grid-box {
+  flex: 0 0 auto;
+  height: 100%;
+  aspect-ratio: 2 / 3;
+  align-self: center;
 }
 
-.detail-icon-box img { width: 100%; height: 100%; object-fit: cover; }
-.detail-icon-box .letter { font-size: 56px; font-weight: 700; color: var(--tile-fg); }
+/* contain, not cover — a picked Grid image is meant to be seen in full,
+   unlike the banner (backdrop art, fine to crop). Cover was cropping
+   non-square art (SteamGridDB grids, some OS-extracted icons) instead of
+   showing the whole picture. */
+.detail-grid-box img { width: 100%; height: 100%; object-fit: contain; }
+.detail-grid-box .letter { font-size: 56px; font-weight: 700; color: var(--tile-fg); }
 
+/* Sized to SteamGridDB's own Hero shape (1920x620, ~3.1:1) — the box was
+   previously 920:430 (~2.14:1), a leftover from when this slot sourced from
+   the Grid endpoint's landscape option instead of the dedicated Hero
+   endpoint, which left ~50px of empty letterboxing above and below every
+   downloaded banner. */
 .detail-banner-box {
   flex: 1;
   min-width: 0;
+  align-self: center;
+  aspect-ratio: 1920 / 620;
 }
 
-.detail-banner-box img { width: 100%; height: 100%; object-fit: cover; }
+/* contain, not cover — a locally-picked file can be any aspect ratio at
+   all, and even Hero art varies slightly game to game; cover would crop it
+   instead of showing the whole picture. */
+.detail-banner-box img { width: 100%; height: 100%; object-fit: contain; }
 
 .detail-meta-row {
   display: flex;
@@ -1020,11 +1098,52 @@ html[data-ui-size="large"] body { zoom: 1.15; }
   white-space: nowrap;
 }
 
+/* A connected segmented control (24-hour/12-hour, Off/On, Small/Medium/
+   Large, −Smaller/+Bigger) — previously these reused .detail-btn.secondary,
+   the same wide standalone pill the Play button uses, which read as a row
+   of disconnected, oddly-spaced buttons rather than one grouped choice. */
 .size-options {
-  display: flex;
-  gap: 10px;
-  padding: 0 10px;
-  margin-top: 6px;
+  display: inline-flex;
+  margin: 6px 0 0 10px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, white 22%, transparent);
+  background: color-mix(in srgb, var(--tile) 55%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.15), 0 4px 10px rgba(0,0,0,0.25);
+}
+
+.option-btn {
+  padding: 11px 22px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  cursor: pointer;
+  border-right: 1px solid color-mix(in srgb, white 14%, transparent);
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.option-btn:last-child { border-right: none; }
+
+.option-btn:hover:not(.active) {
+  background: color-mix(in srgb, var(--tile) 90%, transparent);
+}
+
+.option-btn.active {
+  background: linear-gradient(to bottom,
+    color-mix(in srgb, var(--accent) 80%, white 25%) 0%,
+    var(--accent) 55%,
+    color-mix(in srgb, var(--accent) 85%, black 20%) 100%);
+  color: var(--accent-fg);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.4);
+}
+
+.option-btn.kbd-focus {
+  outline: none;
+  position: relative;
+  z-index: 1;
+  box-shadow: inset 0 0 0 2px var(--accent), 0 0 14px 2px var(--glow);
 }
 
 .timezone-list {

@@ -38,15 +38,23 @@
     return luminance(hex) > 0.6 ? dark : light;
   }
 
-  // Glow/tile are always derived from the one accent color, never set
-  // independently — that's what keeps every part of the theme visually
-  // consistent with whatever single color a user picks in Menu Color.
-  function computeTheme(baseHex) {
+  // Neutral surface colors for the two modes — most of the menu (bg, tiles)
+  // is built from these, not from the accent. Before this, bg/tile were
+  // mixed 32-52% toward the accent itself, so a vivid accent colored
+  // *everything*, leaving nothing neutral for it to stand out against.
+  // Only a light accent tint (TINT below) carries through now, so the
+  // accent still visibly ties into the theme without dominating it.
+  const DARK_BASE = { bg: '#0a0e14', tile: '#1c2430', tileOverlay: '#2a3444' };
+  const LIGHT_BASE = { bg: '#eef1f6', tile: '#ffffff', tileOverlay: '#e2e7f0' };
+  const TINT = 0.08;
+
+  function computeTheme(baseHex, mode) {
+    const base = mode === 'light' ? LIGHT_BASE : DARK_BASE;
     return {
-      bg: darken(baseHex, 0.85),
+      bg: mix(base.bg, baseHex, TINT),
       glow: lighten(baseHex, 0.3),
-      tile: mix(baseHex, '#10141c', 0.68),
-      tileOverlay: mix(baseHex, '#10141c', 0.48),
+      tile: mix(base.tile, baseHex, TINT),
+      tileOverlay: mix(base.tileOverlay, baseHex, TINT * 1.5),
     };
   }
 

@@ -1,8 +1,8 @@
 const state = {
-  apps: [], themeColor: '#0e6cc4', theme: null, assetsDir: '',
+  apps: [], themeColor: '#0e6cc4', themeMode: 'dark', theme: null, assetsDir: '',
   user: { name: 'Player', iconPath: null },
   fontPath: null, fontFamily: null, fontSize: 'medium', customFonts: [],
-  timezone: null, timeFormat: '24h', timezones: [],
+  timezone: null, timeFormat: '24h', timezones: [], showSeconds: false,
 };
 const ui = { screen: 'menu', updateGameSlug: null, selectedSlug: null };
 
@@ -24,6 +24,15 @@ const PRESET_ACCENTS = [
   ['#17c3b2', 'Teal'],
   ['#29c5f6', 'Sky Cyan'],
 ];
+
+// SteamGridDB lookups are slow (each is a network round trip to
+// steamgriddb.com), and the same game gets looked up repeatedly — Change
+// Icon then Change Grid then Change Banner all search for the same game
+// name, and reopening a picker re-fetches the same art list. Cache both
+// steps in memory for the session so only the first lookup per game (or
+// per game+kind) pays the network cost.
+const sgdbSearchCache = new Map(); // name.trim().toLowerCase() -> {id, name}
+const sgdbArtCache = new Map(); // `${gameId}:${kind}` -> grids array
 
 let clockInterval = null;
 let screenInterval = null;
@@ -50,6 +59,7 @@ function fileUrl(p) {
 
 function formatClock(tz) {
   const opts = { hour: '2-digit', minute: '2-digit', hour12: state.timeFormat === '12h' };
+  if (state.showSeconds) opts.second = '2-digit';
   const zone = tz !== undefined ? tz : state.timezone;
   if (zone) opts.timeZone = zone;
   return new Intl.DateTimeFormat('en-US', opts).format(new Date());
@@ -133,6 +143,15 @@ function applyFontSize(size) {
   document.documentElement.setAttribute('data-ui-size', size);
 }
 
+// Each imported font remembers its own scale (state.customFonts[].scale) —
+// different font files render at very different apparent sizes for the
+// same nominal font-size, so this multiplies on top of the Small/Medium/
+// Large preset (see body's zoom calc() in style.css) rather than being
+// just one more global size knob.
+function applyCustomFontScale(scale) {
+  document.documentElement.style.setProperty('--font-scale', String(scale || 1));
+}
+
 async function persistDisplaySettings() {
   await window.api.saveDisplaySettings({
     fontPath: state.fontPath,
@@ -140,6 +159,7 @@ async function persistDisplaySettings() {
     fontSize: state.fontSize,
     timezone: state.timezone,
     timeFormat: state.timeFormat,
+    showSeconds: state.showSeconds,
   });
 }
 
@@ -301,6 +321,57 @@ function create2DNav(items, cols, { onEscape } = {}) {
     }
   }
   return { handleKey, activate, getIndex: () => index };
+}
+
+// For screens mixing single-item rows (a form row, a list row) with
+// horizontal button groups (24-hour/12-hour, Off/On, Small/Medium/Large) —
+// unlike create2DNav's uniform grid, each row here can hold a different
+// number of items. Up/Down moves between rows (clamping the column to
+// whatever the new row has); Left/Right moves within the current row and
+// is a harmless no-op on a single-item row, so a horizontal pair is
+// actually reachable with Left/Right instead of only responding to Up/Down
+// as if it were just another vertical list entry.
+function createRowNav(rows, { onEscape } = {}) {
+  let row = 0;
+  let col = 0;
+  function currentRow() {
+    return rows[row] || [];
+  }
+  function apply() {
+    rows.forEach((r, ri) => r.forEach((it, ci) => it.el.classList.toggle('kbd-focus', ri === row && ci === col)));
+    const cur = currentRow()[col];
+    cur?.el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+    cur?.el.focus?.();
+  }
+  if (rows.length && rows[0].length) apply();
+  function moveRow(delta) {
+    if (!rows.length) return;
+    row = Math.max(0, Math.min(rows.length - 1, row + delta));
+    col = Math.min(col, Math.max(0, currentRow().length - 1));
+    apply();
+  }
+  function moveCol(delta) {
+    const r = currentRow();
+    if (r.length < 2) return;
+    col = Math.max(0, Math.min(r.length - 1, col + delta));
+    apply();
+  }
+  function activate() {
+    currentRow()[col]?.activate();
+  }
+  function handleKey(e) {
+    switch (e.key) {
+      case 'ArrowDown': moveRow(1); e.preventDefault(); break;
+      case 'ArrowUp': moveRow(-1); e.preventDefault(); break;
+      case 'ArrowRight': moveCol(1); e.preventDefault(); break;
+      case 'ArrowLeft': moveCol(-1); e.preventDefault(); break;
+      case 'Enter':
+      case ' ': activate(); e.preventDefault(); break;
+      case 'Escape': if (onEscape) { onEscape(); e.preventDefault(); } break;
+      default: break;
+    }
+  }
+  return { handleKey, activate };
 }
 
 // The settings grid's CSS (repeat(auto-fill, ...)) wraps to however many
@@ -503,9 +574,11 @@ function showArtPicker(gameName, grids, kind = 'banner') {
     const thumbItems = [];
     grids.forEach((g) => {
       const img = document.createElement('img');
-      // Icons are square; banners/grids are portrait — squashing an icon
-      // into the banner's 2:3 box visibly distorts it.
-      img.className = kind === 'icon' ? 'art-thumb art-thumb-icon' : 'art-thumb';
+      // Icons are square, Grids are portrait (Steam's tall capsule art),
+      // Banners are wide (SteamGridDB's Hero asset) — each gets a thumb
+      // shaped like what it actually is, instead of squashing/stretching
+      // it into a box built for a different aspect ratio.
+      img.className = 'art-thumb' + (kind === 'icon' ? ' art-thumb-icon' : kind === 'banner' ? ' art-thumb-banner' : '');
       img.src = g.thumb;
       img.addEventListener('click', () => close(g.url));
       grid.appendChild(img);
@@ -520,10 +593,11 @@ function showArtPicker(gameName, grids, kind = 'banner') {
     buttons.appendChild(skipBtn);
     modal.append(h, p, grid, buttons);
 
-    // 3 columns to match .art-grid's own grid-template-columns, so
-    // arrow-key/gamepad nav lines up with the actual visual layout.
+    // Matches .art-grid's actual visual layout: 3 columns normally, but
+    // banner thumbs are full-width rows (see .art-thumb-banner), so that
+    // kind navigates as a single column instead.
     const items = thumbItems.concat([{ el: skipBtn, activate: () => close(null) }]);
-    const nav = create2DNav(items, 3, { onEscape: () => close(null) });
+    const nav = create2DNav(items, kind === 'banner' ? 1 : 3, { onEscape: () => close(null) });
     modal.parentElement.addEventListener('keydown', (e) => nav.handleKey(e));
   }, { wide: true, hints: [{ key: '↑↓←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Skip' }] });
 }
@@ -539,27 +613,44 @@ async function manageSteamGridDbKey() {
   await window.api.saveSteamGridDbKey(key);
 }
 
-// Looks up art for a game on SteamGridDB. kind is 'icon' or 'banner'.
-// Returns a local file path on success, or null on any failure (no key,
-// no results, download error) — every caller treats null as "no change",
-// so a SteamGridDB hiccup never blocks the surrounding flow.
+const ART_KIND_LABEL = { icon: 'Icon', grid: 'Grid', banner: 'Banner' };
+
+// Looks up art for a game on SteamGridDB. kind is 'icon', 'grid', or
+// 'banner' — three distinct SteamGridDB asset types (Icons, Grids, Heroes),
+// not one image reused for two purposes. Returns a local file path on
+// success, or null on any failure (no key, no results, download error) —
+// every caller treats null as "no change", so a SteamGridDB hiccup never
+// blocks the surrounding flow.
 async function pickSteamGridDbArt(name, appPath, kind = 'banner') {
   const key = await window.api.getSteamGridDbKey();
   if (!key) return null;
 
-  let hideLoading = showLoadingModal(`Searching SteamGridDB for "${name}"…`);
-  const searchRes = await window.api.steamGridDbSearch(name);
-  hideLoading();
-  if (!searchRes.ok || !searchRes.results.length) return null;
+  const searchKey = name.trim().toLowerCase();
+  let match = sgdbSearchCache.get(searchKey);
+  if (!match) {
+    let hideLoading = showLoadingModal(`Searching SteamGridDB for "${name}"…`);
+    const searchRes = await window.api.steamGridDbSearch(name);
+    hideLoading();
+    if (!searchRes.ok || !searchRes.results.length) return null;
+    match = searchRes.results[0];
+    sgdbSearchCache.set(searchKey, match);
+  }
 
-  hideLoading = showLoadingModal(kind === 'icon' ? 'Fetching icon options…' : 'Fetching cover art options…');
-  const gridsRes = kind === 'icon'
-    ? await window.api.steamGridDbIcons(searchRes.results[0].id)
-    : await window.api.steamGridDbGrids(searchRes.results[0].id);
-  hideLoading();
-  if (!gridsRes.ok || !gridsRes.grids.length) return null;
+  const artCacheKey = `${match.id}:${kind}`;
+  let grids = sgdbArtCache.get(artCacheKey);
+  if (!grids) {
+    const hideLoading = showLoadingModal(`Fetching ${ART_KIND_LABEL[kind].toLowerCase()} options…`);
+    const fetchFn = kind === 'icon' ? window.api.steamGridDbIcons
+      : kind === 'grid' ? window.api.steamGridDbGrids
+      : window.api.steamGridDbHeroes;
+    const gridsRes = await fetchFn(match.id);
+    hideLoading();
+    if (!gridsRes.ok || !gridsRes.grids.length) return null;
+    grids = gridsRes.grids;
+    sgdbArtCache.set(artCacheKey, grids);
+  }
 
-  const chosenUrl = await showArtPicker(searchRes.results[0].name, gridsRes.grids, kind);
+  const chosenUrl = await showArtPicker(match.name, grids, kind);
   if (!chosenUrl) return null;
 
   hideLoading = showLoadingModal('Downloading…');
@@ -568,11 +659,12 @@ async function pickSteamGridDbArt(name, appPath, kind = 'banner') {
   return dl.ok ? dl.path : null;
 }
 
-// Shared by Update Game's Change Icon / Change Banner rows and Add Game.
-// Returns undefined for "no change" (user cancelled) vs a string path.
+// Shared by Update Game's Change Icon / Change Grid / Change Banner rows
+// and Add Game. Returns undefined for "no change" (user cancelled) vs a
+// string path.
 async function pickImageFor(kind, gameName, appPath) {
   const choice = await showChoice(
-    kind === 'icon' ? 'Change Icon' : 'Change Banner',
+    `Change ${ART_KIND_LABEL[kind]}`,
     'Search SteamGridDB, or choose a file from your computer.',
     [
       { label: 'SteamGridDB', value: 'search', primary: true },
@@ -593,13 +685,6 @@ async function pickImageFor(kind, gameName, appPath) {
 
 function tileIconNode(entry) {
   if (entry.kind === 'game') {
-    if (entry.bannerPath) {
-      const img = document.createElement('img');
-      img.className = 'art-cover';
-      img.src = fileUrl(entry.bannerPath);
-      img.alt = entry.name;
-      return img;
-    }
     if (entry.iconPath) {
       const img = document.createElement('img');
       img.className = 'icon-img';
@@ -880,8 +965,9 @@ async function addGameFlow() {
   const name = await showPrompt('New app', 'Name:', defaultName);
   if (!name) return;
   const iconPath = await pickImageFor('icon', name, chosen);
+  const gridPath = await pickImageFor('grid', name, chosen);
   const bannerPath = await pickImageFor('banner', name, chosen);
-  state.apps = await window.api.addApp({ name, path: chosen, iconPath, bannerPath });
+  state.apps = await window.api.addApp({ name, path: chosen, iconPath, gridPath, bannerPath });
   render();
 }
 
@@ -1109,28 +1195,35 @@ function buildDetailPane() {
   return pane;
 }
 
+let detailResizeObserver = null;
+
 function fillDetailPane(pane, entry) {
   pane.innerHTML = '';
+  if (detailResizeObserver) {
+    detailResizeObserver.disconnect();
+    detailResizeObserver = null;
+  }
   if (!entry) return;
 
-  // Icon and banner as their own boxes side by side (icon left, banner
-  // right) — matching the app's wireframe rather than a Steam-style single
-  // hero with the icon overlapping the banner's corner.
+  // Grid and banner as their own boxes side by side (grid left, banner
+  // right) — the app's own icon (already shown next to the game in the
+  // sidebar list) doesn't repeat here; this row is SteamGridDB's other two
+  // asset types, Grid and Hero.
   const topRow = document.createElement('div');
   topRow.className = 'detail-top-row';
 
-  const iconBox = document.createElement('div');
-  iconBox.className = 'detail-icon-box';
-  if (entry.iconPath) {
+  const gridBox = document.createElement('div');
+  gridBox.className = 'detail-grid-box';
+  if (entry.gridPath) {
     const img = document.createElement('img');
-    img.src = fileUrl(entry.iconPath);
+    img.src = fileUrl(entry.gridPath);
     img.alt = entry.name;
-    iconBox.appendChild(img);
+    gridBox.appendChild(img);
   } else {
     const span = document.createElement('span');
     span.className = 'letter';
     span.textContent = (entry.name[0] || '?').toUpperCase();
-    iconBox.appendChild(span);
+    gridBox.appendChild(span);
   }
 
   const bannerBox = document.createElement('div');
@@ -1142,7 +1235,20 @@ function fillDetailPane(pane, entry) {
     bannerBox.appendChild(bannerImg);
   }
 
-  topRow.append(iconBox, bannerBox);
+  topRow.append(gridBox, bannerBox);
+
+  // The grid box is a fixed 2:3 portrait and the banner box a fixed ~3.1:1
+  // landscape — at a shared row height those two ratios naturally render at
+  // different heights (banner's width is capped by the remaining row space,
+  // which caps its height too). Lock the grid box to the banner's actual
+  // height instead of the row's, so their tops and bottoms line up. Read
+  // getComputedStyle rather than getBoundingClientRect: the app's text-size
+  // setting uses CSS zoom, which getBoundingClientRect reports post-zoom —
+  // feeding that straight into style.height would zoom it a second time.
+  detailResizeObserver = new ResizeObserver(() => {
+    gridBox.style.height = getComputedStyle(bannerBox).height;
+  });
+  detailResizeObserver.observe(bannerBox);
 
   const metaRow = document.createElement('div');
   metaRow.className = 'detail-meta-row';
@@ -1317,7 +1423,25 @@ function renderUpdateGameEdit(appEl) {
   };
   bannerRow.addEventListener('click', doChangeBanner);
 
-  form.append(iconRow, bannerRow);
+  const gridRow = document.createElement('div');
+  gridRow.className = 'update-row';
+  const gridLabel = document.createElement('div');
+  gridLabel.className = 'update-row-label';
+  gridLabel.textContent = 'Grid';
+  const gridVal = document.createElement('div');
+  gridVal.className = 'update-row-value';
+  gridVal.textContent = entry.gridPath ? 'Set' : '(none)';
+  gridRow.append(gridLabel, gridVal);
+  const doChangeGrid = async () => {
+    const result = await pickImageFor('grid', entry.name, entry.path);
+    if (result !== undefined) {
+      state.apps = await window.api.updateApp({ slug: entry.slug, gridPath: result });
+      render();
+    }
+  };
+  gridRow.addEventListener('click', doChangeGrid);
+
+  form.append(iconRow, gridRow, bannerRow);
 
   const goBack = () => { ui.screen = 'updateGamePick'; render(); };
   const backBtn = document.createElement('div');
@@ -1331,6 +1455,7 @@ function renderUpdateGameEdit(appEl) {
   const items = [
     ...fieldRows,
     { el: iconRow, activate: doChangeIcon },
+    { el: gridRow, activate: doChangeGrid },
     { el: bannerRow, activate: doChangeBanner },
     { el: backBtn, activate: goBack },
   ];
@@ -1358,6 +1483,7 @@ function renderFont(appEl) {
     const picked = await window.api.chooseFontPath();
     if (!picked) return;
     applyCustomFont(picked.path, 'CustomUserFont');
+    applyCustomFontScale(1); // a freshly imported font always starts at its own 100%
     state.fontPath = picked.path;
     state.fontFamily = 'CustomUserFont';
     state.customFonts = picked.customFonts;
@@ -1369,6 +1495,7 @@ function renderFont(appEl) {
   resetRow.textContent = 'Reset to Default Font';
   resetRow.addEventListener('click', async () => {
     applyCustomFont(null, null);
+    applyCustomFontScale(1);
     state.fontPath = null;
     state.fontFamily = null;
     await persistDisplaySettings();
@@ -1386,13 +1513,15 @@ function renderFont(appEl) {
   fontListLabel.textContent = 'Imported Fonts';
   fontListLabel.style.margin = '16px 0 0 10px';
 
+  // Windows font_path uses backslashes (path.join on the main-process
+  // side), so a plain endsWith('/'+fileName) would never match there —
+  // compare basenames on either separator instead.
+  const activeFontFileName = state.fontPath ? state.fontPath.split(/[\\/]/).pop() : null;
+
   const fontList = document.createElement('div');
   fontList.className = 'timezone-list';
   const fontRows = state.customFonts.map((font) => {
-    // Windows font_path uses backslashes (path.join on the main-process
-    // side), so a plain endsWith('/'+fileName) would never match there —
-    // compare basenames on either separator instead.
-    const isActive = state.fontPath && state.fontPath.split(/[\\/]/).pop() === font.fileName;
+    const isActive = font.fileName === activeFontFileName;
     const row = document.createElement('div');
     row.className = 'timezone-row' + (isActive ? ' active' : '');
     const name = document.createElement('div');
@@ -1409,6 +1538,7 @@ function renderFont(appEl) {
     const activateFont = async () => {
       const data = await window.api.selectFont(font.fileName);
       applyCustomFont(data.fontPath, data.fontFamily);
+      applyCustomFontScale(font.scale || 1);
       state.fontPath = data.fontPath;
       state.fontFamily = data.fontFamily;
       state.customFonts = data.customFonts;
@@ -1418,7 +1548,7 @@ function renderFont(appEl) {
     removeBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       const data = await window.api.removeFont(font.fileName);
-      if (!data.fontPath) applyCustomFont(null, null);
+      if (!data.fontPath) { applyCustomFont(null, null); applyCustomFontScale(1); }
       state.fontPath = data.fontPath;
       state.fontFamily = data.fontFamily;
       state.customFonts = data.customFonts;
@@ -1434,6 +1564,40 @@ function renderFont(appEl) {
     fontList.appendChild(empty);
   }
 
+  // Only shown for an active custom font — the default UI font doesn't
+  // have this problem since every size in this app was tuned against it.
+  const activeFontEntry = state.customFonts.find((f) => f.fileName === activeFontFileName);
+  let scaleLabel = null;
+  let scaleRow = null;
+  let scaleBtns = [];
+  if (activeFontEntry) {
+    const currentScale = activeFontEntry.scale || 1;
+    scaleLabel = document.createElement('div');
+    scaleLabel.className = 'screen-subtitle';
+    scaleLabel.textContent = `Font Scale — ${activeFontEntry.displayName} at ${Math.round(currentScale * 100)}%`;
+    scaleLabel.style.margin = '16px 0 0 10px';
+
+    scaleRow = document.createElement('div');
+    scaleRow.className = 'size-options';
+    const adjustScale = async (delta) => {
+      const newScale = Math.round(Math.max(0.7, Math.min(2, currentScale + delta)) * 10) / 10;
+      const data = await window.api.setFontScale({ fileName: activeFontEntry.fileName, scale: newScale });
+      applyCustomFontScale(newScale);
+      state.customFonts = data.customFonts;
+      render();
+    };
+    const minusBtn = document.createElement('div');
+    minusBtn.className = 'option-btn';
+    minusBtn.textContent = '− Smaller';
+    minusBtn.addEventListener('click', () => adjustScale(-0.1));
+    const plusBtn = document.createElement('div');
+    plusBtn.className = 'option-btn';
+    plusBtn.textContent = '+ Bigger';
+    plusBtn.addEventListener('click', () => adjustScale(0.1));
+    scaleRow.append(minusBtn, plusBtn);
+    scaleBtns = [minusBtn, plusBtn];
+  }
+
   const sizeLabel = document.createElement('div');
   sizeLabel.className = 'screen-subtitle';
   sizeLabel.textContent = `Text Size — currently ${state.fontSize[0].toUpperCase()}${state.fontSize.slice(1)}`;
@@ -1443,7 +1607,7 @@ function renderFont(appEl) {
   sizeRow.className = 'size-options';
   const sizeBtns = ['small', 'medium', 'large'].map((size) => {
     const btn = document.createElement('div');
-    btn.className = 'detail-btn secondary' + (state.fontSize === size ? ' active' : '');
+    btn.className = 'option-btn' + (state.fontSize === size ? ' active' : '');
     btn.textContent = size[0].toUpperCase() + size.slice(1);
     btn.addEventListener('click', async () => {
       applyFontSize(size);
@@ -1461,20 +1625,26 @@ function renderFont(appEl) {
   backBtn.textContent = 'Back';
   backBtn.addEventListener('click', goBack);
 
-  body.append(form, fontListLabel, fontList, sizeLabel, sizeRow, backBtn);
+  body.append(form, fontListLabel, fontList);
+  if (scaleLabel) body.append(scaleLabel, scaleRow);
+  body.append(sizeLabel, sizeRow, backBtn);
   appEl.append(header, body);
 
-  const items = [
-    { el: importRow, activate: () => importRow.click() },
-    { el: resetRow, activate: () => resetRow.click() },
-    ...fontRows,
-    ...sizeBtns.map((b) => ({ el: b, activate: () => b.click() })),
-    { el: backBtn, activate: goBack },
+  // Small/Medium/Large (and, when shown, −/+ Font Scale) are each a
+  // horizontal group (Left/Right); everything else is its own row
+  // (Up/Down) — see createRowNav.
+  const rows = [
+    [{ el: importRow, activate: () => importRow.click() }],
+    [{ el: resetRow, activate: () => resetRow.click() }],
+    ...fontRows.map((r) => [r]),
+    ...(scaleBtns.length ? [scaleBtns.map((b) => ({ el: b, activate: () => b.click() }))] : []),
+    sizeBtns.map((b) => ({ el: b, activate: () => b.click() })),
+    [{ el: backBtn, activate: goBack }],
   ];
-  const nav = createNav(items, { vertical: true, onEscape: goBack });
+  const nav = createRowNav(rows, { onEscape: goBack });
   currentKeyHandler = (e) => nav.handleKey(e);
 
-  setHints([{ key: '↑↓', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+  setHints([{ key: '↑↓', label: 'Navigate' }, { key: '←→', label: 'Choose' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
 }
 
 /* ---------- time settings ---------- */
@@ -1493,7 +1663,7 @@ function renderTime(appEl) {
   formatRow.className = 'size-options';
   const formatBtns = ['24h', '12h'].map((fmt) => {
     const btn = document.createElement('div');
-    btn.className = 'detail-btn secondary' + (state.timeFormat === fmt ? ' active' : '');
+    btn.className = 'option-btn' + (state.timeFormat === fmt ? ' active' : '');
     btn.textContent = fmt === '24h' ? '24-hour' : '12-hour';
     btn.addEventListener('click', async () => {
       state.timeFormat = fmt;
@@ -1501,6 +1671,27 @@ function renderTime(appEl) {
       render();
     });
     formatRow.appendChild(btn);
+    return btn;
+  });
+
+  const secondsLabel = document.createElement('div');
+  secondsLabel.className = 'screen-subtitle';
+  secondsLabel.textContent = 'Show Seconds';
+  secondsLabel.style.margin = '16px 0 0 10px';
+
+  const secondsRow = document.createElement('div');
+  secondsRow.className = 'size-options';
+  const secondsBtns = [['off', 'Off'], ['on', 'On']].map(([value, label]) => {
+    const btn = document.createElement('div');
+    const isActive = state.showSeconds === (value === 'on');
+    btn.className = 'option-btn' + (isActive ? ' active' : '');
+    btn.textContent = label;
+    btn.addEventListener('click', async () => {
+      state.showSeconds = value === 'on';
+      await persistDisplaySettings();
+      render();
+    });
+    secondsRow.appendChild(btn);
     return btn;
   });
 
@@ -1544,18 +1735,21 @@ function renderTime(appEl) {
   backBtn.textContent = 'Back';
   backBtn.addEventListener('click', goBack);
 
-  body.append(formatRow, list, backBtn);
+  body.append(formatRow, secondsLabel, secondsRow, list, backBtn);
   appEl.append(header, body);
 
-  const items = [
-    ...formatBtns.map((b) => ({ el: b, activate: () => b.click() })),
-    ...zoneRows.map((r) => ({ el: r.row, activate: () => r.row.click() })),
-    { el: backBtn, activate: goBack },
+  // 24-hour/12-hour and Off/On are each a horizontal pair (Left/Right);
+  // everything else is its own row (Up/Down) — see createRowNav.
+  const rows = [
+    formatBtns.map((b) => ({ el: b, activate: () => b.click() })),
+    secondsBtns.map((b) => ({ el: b, activate: () => b.click() })),
+    ...zoneRows.map((r) => [{ el: r.row, activate: () => r.row.click() }]),
+    [{ el: backBtn, activate: goBack }],
   ];
-  const nav = createNav(items, { vertical: true, onEscape: goBack });
+  const nav = createRowNav(rows, { onEscape: goBack });
   currentKeyHandler = (e) => nav.handleKey(e);
 
-  setHints([{ key: '↑↓', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+  setHints([{ key: '↑↓', label: 'Navigate' }, { key: '←→', label: 'Choose' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
 }
 
 /* ---------- menu color ---------- */
@@ -1564,7 +1758,7 @@ function renderTime(appEl) {
 // grid in the app (tile-wrap/tile-surface/bubble) instead of a bespoke
 // look — reusing that language is what makes this screen feel consistent
 // with Settings/Add Game rather than like a separate color-tool bolted on.
-function buildColorGrid(entries, onActivate, activeHex) {
+function buildColorGrid(entries, onActivate, activeHex, activeMode) {
   const outer = document.createElement('div');
   outer.className = 'settings-grid-outer';
   const grid = document.createElement('div');
@@ -1583,6 +1777,22 @@ function buildColorGrid(entries, onActivate, activeHex) {
       if (entry.hex.toLowerCase() === activeHex.toLowerCase()) {
         const check = document.createElement('span');
         check.className = 'color-swatch-check';
+        check.style.color = Theme.readableFg(entry.hex);
+        check.textContent = '✓';
+        surface.appendChild(check);
+      }
+    } else if (entry.kind === 'mode') {
+      const span = document.createElement('span');
+      span.className = 'letter';
+      span.textContent = entry.mode === 'light' ? '☀️' : '🌙';
+      surface.appendChild(span);
+      if (entry.mode === activeMode) {
+        const check = document.createElement('span');
+        // Not .color-swatch-check: this tile's background is --tile
+        // (near-white in Light Mode), not an arbitrary hex, so it just
+        // reuses the existing --tile-fg variable instead of computing
+        // readableFg itself.
+        check.className = 'mode-tile-check';
         check.textContent = '✓';
         surface.appendChild(check);
       }
@@ -1712,13 +1922,21 @@ function renderColor(appEl) {
   body.appendChild(buildScreenTitle('Menu Color'));
   const subtitle = document.createElement('div');
   subtitle.className = 'screen-subtitle';
-  subtitle.textContent = `Accent: ${state.themeColor} — glow and tiles match it automatically.`;
+  subtitle.textContent = `Accent: ${state.themeColor}, ${state.themeMode === 'light' ? 'Light' : 'Dark'} mode — everything else matches automatically.`;
   body.appendChild(subtitle);
 
   async function applyAccent(hex) {
-    await window.api.saveSettings({ themeColor: hex });
+    await window.api.saveSettings({ themeColor: hex, themeMode: state.themeMode });
     state.themeColor = hex;
-    state.theme = Theme.computeTheme(hex);
+    state.theme = Theme.computeTheme(hex, state.themeMode);
+    applyTheme();
+    render();
+  }
+
+  async function applyMode(mode) {
+    await window.api.saveSettings({ themeColor: state.themeColor, themeMode: mode });
+    state.themeMode = mode;
+    state.theme = Theme.computeTheme(state.themeColor, mode);
     applyTheme();
     render();
   }
@@ -1726,6 +1944,8 @@ function renderColor(appEl) {
   async function activateColorEntry(entry) {
     if (entry.kind === 'swatch') {
       await applyAccent(entry.hex);
+    } else if (entry.kind === 'mode') {
+      await applyMode(entry.mode);
     } else if (entry.kind === 'custom') {
       const hex = await showCustomColorModal(state.themeColor);
       if (hex) await applyAccent(hex);
@@ -1736,12 +1956,14 @@ function renderColor(appEl) {
   }
 
   const entries = [
+    { kind: 'mode', mode: 'dark', name: 'Dark Mode' },
+    { kind: 'mode', mode: 'light', name: 'Light Mode' },
     ...PRESET_ACCENTS.map(([hex, name]) => ({ kind: 'swatch', hex, name })),
     { kind: 'custom', name: 'Custom Color' },
     { kind: 'back', name: 'Back' },
   ];
 
-  const { gridEl, items } = buildColorGrid(entries, activateColorEntry, state.themeColor);
+  const { gridEl, items } = buildColorGrid(entries, activateColorEntry, state.themeColor, state.themeMode);
   body.appendChild(gridEl);
   appEl.append(header, body);
 
@@ -1759,6 +1981,7 @@ async function init() {
   state.apps = data.apps;
   state.user = data.user;
   state.themeColor = data.themeColor;
+  state.themeMode = data.themeMode;
   state.assetsDir = data.assetsDir;
   state.fontPath = data.fontPath;
   state.fontFamily = data.fontFamily;
@@ -1767,9 +1990,14 @@ async function init() {
   state.timezone = data.timezone;
   state.timeFormat = data.timeFormat;
   state.timezones = data.timezones;
-  state.theme = Theme.computeTheme(state.themeColor);
+  state.showSeconds = data.showSeconds;
+  state.theme = Theme.computeTheme(state.themeColor, state.themeMode);
   applyTheme();
-  if (state.fontPath && state.fontFamily) applyCustomFont(state.fontPath, state.fontFamily);
+  if (state.fontPath && state.fontFamily) {
+    applyCustomFont(state.fontPath, state.fontFamily);
+    const activeFileName = state.fontPath.split(/[\\/]/).pop();
+    applyCustomFontScale(state.customFonts.find((f) => f.fileName === activeFileName)?.scale || 1);
+  }
   applyFontSize(state.fontSize);
 
   window.api.onAppsUpdated((apps) => {

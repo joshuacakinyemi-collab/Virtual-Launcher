@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('api', {
   chooseFontPath: () => ipcRenderer.invoke('choose-font-path'),
   selectFont: (fileName) => ipcRenderer.invoke('select-font', fileName),
   removeFont: (fileName) => ipcRenderer.invoke('remove-font', fileName),
+  setFontScale: (payload) => ipcRenderer.invoke('set-font-scale', payload),
   addApp: (payload) => ipcRenderer.invoke('add-app', payload),
   updateApp: (payload) => ipcRenderer.invoke('update-app', payload),
   removeApp: (slug) => ipcRenderer.invoke('remove-app', slug),
@@ -25,5 +26,6 @@ contextBridge.exposeInMainWorld('api', {
   steamGridDbSearch: (term) => ipcRenderer.invoke('steamgriddb-search', term),
   steamGridDbGrids: (gameId) => ipcRenderer.invoke('steamgriddb-grids', gameId),
   steamGridDbIcons: (gameId) => ipcRenderer.invoke('steamgriddb-icons', gameId),
+  steamGridDbHeroes: (gameId) => ipcRenderer.invoke('steamgriddb-heroes', gameId),
   steamGridDbDownload: (payload) => ipcRenderer.invoke('steamgriddb-download', payload),
 });
