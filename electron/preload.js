@@ -28,4 +28,18 @@ contextBridge.exposeInMainWorld('api', {
   steamGridDbIcons: (gameId) => ipcRenderer.invoke('steamgriddb-icons', gameId),
   steamGridDbHeroes: (gameId) => ipcRenderer.invoke('steamgriddb-heroes', gameId),
   steamGridDbDownload: (payload) => ipcRenderer.invoke('steamgriddb-download', payload),
+  chooseMusicPath: () => ipcRenderer.invoke('choose-music-path'),
+  selectMusic: (fileName) => ipcRenderer.invoke('select-music', fileName),
+  removeMusic: (fileName) => ipcRenderer.invoke('remove-music', fileName),
+  setMusicVolume: (volume) => ipcRenderer.invoke('set-music-volume', volume),
+  setMusicMuted: (muted) => ipcRenderer.invoke('set-music-muted', muted),
+  chooseUiSound: (kind) => ipcRenderer.invoke('choose-ui-sound', kind),
+  selectUiSound: (kind, fileName) => ipcRenderer.invoke('select-ui-sound', { kind, fileName }),
+  clearUiSound: (kind) => ipcRenderer.invoke('clear-ui-sound', kind),
+  removeUiSound: (kind, fileName) => ipcRenderer.invoke('remove-ui-sound', { kind, fileName }),
+  onGameExited: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('game-exited', listener);
+    return () => ipcRenderer.removeListener('game-exited', listener);
+  },
 });

@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFileSync, execFile } = require('child_process');
 
 // Bundled, read-only assets — shipped inside the app itself, same in dev
 // and in a packaged build, so these stay relative to this file rather than
@@ -36,6 +36,94 @@ function iconCacheDir() {
 }
 function fontsDir() {
   return path.join(userDataDir(), 'fonts');
+}
+function musicDir() {
+  return path.join(userDataDir(), 'music');
+}
+function uiSoundsDir() {
+  return path.join(userDataDir(), 'ui_sounds');
+}
+// Each kind gets its own subfolder rather than one shared dir — keeps
+// same-named imports for different kinds (e.g. two different "blip.wav"
+// files, one picked for Move and one for Confirm) from colliding.
+function uiSoundKindDir(kind) {
+  return path.join(uiSoundsDir(), kind);
+}
+
+const UI_SOUND_KINDS = ['move', 'confirm', 'back'];
+
+// Shared by every "imported file" list this app keeps (fonts, background
+// music, per-kind menu sounds) — each of those used to hand-roll the same
+// dedupe-by-bytes-and-pick-a-unique-name logic, and the same
+// select-by-fileName / remove-by-fileName logic, once per list. `fileName`
+// in all three helpers ultimately comes from settings.json (a stored
+// list entry, or an IPC argument echoing one back) rather than fresh user
+// input, so isSafeFileName guards against a hand-edited or corrupted
+// settings file pointing outside its own managed directory.
+function isSafeFileName(name) {
+  return typeof name === 'string' && name.length > 0
+    && !name.includes('/') && !name.includes('\\') && name !== '.' && name !== '..';
+}
+
+// Copies srcPath into dir, reusing an existing list entry if the bytes
+// already match one instead of piling up duplicate entries for the same
+// file. A cheap size comparison runs before any full read, since two
+// different files almost always differ in size — the common case never
+// pays for reading a candidate's full bytes just to rule it out. Returns
+// the resolved {fileName, displayName, list} (list is `existingList`
+// unchanged when reusing a duplicate, or with the new entry appended).
+function importDedupedFile(dir, srcPath, existingList, { fallbackBase, defaultExt }) {
+  const ext = path.extname(srcPath) || defaultExt;
+  const displayName = path.basename(srcPath, path.extname(srcPath)) || fallbackBase;
+  const safeBase = displayName.replace(/[^A-Za-z0-9_-]+/g, '_') || fallbackBase;
+
+  fs.mkdirSync(dir, { recursive: true });
+  const srcSize = fs.statSync(srcPath).size;
+  const srcBuf = fs.readFileSync(srcPath);
+  const duplicate = existingList.find((f) => {
+    try {
+      const candidatePath = path.join(dir, f.fileName);
+      if (fs.statSync(candidatePath).size !== srcSize) return false;
+      return fs.readFileSync(candidatePath).equals(srcBuf);
+    } catch {
+      return false;
+    }
+  });
+
+  let fileName;
+  if (duplicate) {
+    fileName = duplicate.fileName;
+  } else {
+    fileName = `${safeBase}${ext}`;
+    let counter = 2;
+    while (fs.existsSync(path.join(dir, fileName))) {
+      fileName = `${safeBase}_${counter}${ext}`;
+      counter += 1;
+    }
+    fs.writeFileSync(path.join(dir, fileName), srcBuf);
+  }
+
+  const list = duplicate ? existingList : [...existingList, { fileName, displayName }];
+  return { fileName, displayName, list };
+}
+
+// Resolves a previously-imported file's stored fileName back to its full
+// path, or null if it's missing from the list or looks unsafe.
+function selectStoredFile(dir, list, fileName) {
+  if (!isSafeFileName(fileName)) return null;
+  if (!list.some((f) => f.fileName === fileName)) return null;
+  return path.join(dir, fileName);
+}
+
+// Deletes one imported file (best-effort) and returns the list with its
+// entry removed, plus whether it was actually present.
+function removeStoredFile(dir, list, fileName) {
+  if (!isSafeFileName(fileName)) return { list, removed: false };
+  const removed = list.some((f) => f.fileName === fileName);
+  if (removed) {
+    try { fs.unlinkSync(path.join(dir, fileName)); } catch { /* already gone */ }
+  }
+  return { list: list.filter((f) => f.fileName !== fileName), removed };
 }
 
 // One-time migration from this project's old pre-packaging layout (data
@@ -158,7 +246,13 @@ function loadSettings() {
   const themeColor = data.theme_color || DEFAULT_THEME_COLOR;
   let customFonts = Array.isArray(data.custom_fonts)
     ? data.custom_fonts
-      .filter((f) => f && typeof f.fileName === 'string' && typeof f.displayName === 'string')
+      // isSafeFileName guards select-font/remove-font against a corrupted
+      // or hand-edited settings.json pointing outside fontsDir(); the
+      // existsSync check drops "ghost" entries whose backing file was
+      // deleted out from under the app, so a Change Font row always
+      // matches something that's actually still there to select.
+      .filter((f) => f && typeof f.fileName === 'string' && typeof f.displayName === 'string'
+        && isSafeFileName(f.fileName) && fs.existsSync(path.join(fontsDir(), f.fileName)))
       // Each font remembers its own scale — different font files render at
       // very different apparent sizes for the same CSS font-size (their
       // own internal glyph proportions differ), so one global size setting
@@ -184,6 +278,51 @@ function loadSettings() {
     }
   }
 
+  // Every track ever imported stays listed (custom_music), same as
+  // custom_fonts — Change Music offers a "pick from what's already been
+  // imported" list instead of forcing another trip through the file
+  // browser every time you want to switch back to one you used before.
+  let customMusic = Array.isArray(data.custom_music)
+    ? data.custom_music.filter((f) => f && typeof f.fileName === 'string' && typeof f.displayName === 'string'
+      && isSafeFileName(f.fileName) && fs.existsSync(path.join(musicDir(), f.fileName)))
+    : [];
+  const musicPath = typeof data.music_path === 'string' && fs.existsSync(data.music_path) ? data.music_path : null;
+
+  if (musicPath && path.dirname(musicPath) === musicDir() && fs.existsSync(musicPath)) {
+    const fileName = path.basename(musicPath);
+    if (!customMusic.some((f) => f.fileName === fileName)) {
+      const displayName = path.basename(musicPath, path.extname(musicPath));
+      customMusic = [...customMusic, { fileName, displayName }];
+      writeRawSettings({ custom_music: customMusic });
+    }
+  }
+
+  // Every sound ever imported for a kind stays listed (custom_ui_sounds),
+  // same reasoning as custom_fonts/custom_music — Menu Sounds offers a
+  // "pick from what's already been imported" list per kind instead of
+  // forcing another trip through the file browser every time.
+  const uiSounds = {};
+  const customUiSounds = {};
+  let customUiSoundsChanged = false;
+  const rawCustomUiSounds = data.custom_ui_sounds && typeof data.custom_ui_sounds === 'object' ? data.custom_ui_sounds : {};
+  for (const kind of UI_SOUND_KINDS) {
+    let list = Array.isArray(rawCustomUiSounds[kind])
+      ? rawCustomUiSounds[kind].filter((f) => f && typeof f.fileName === 'string' && typeof f.displayName === 'string'
+        && isSafeFileName(f.fileName) && fs.existsSync(path.join(uiSoundKindDir(kind), f.fileName)))
+      : [];
+    const activePath = typeof data[`ui_sound_${kind}`] === 'string' && fs.existsSync(data[`ui_sound_${kind}`]) ? data[`ui_sound_${kind}`] : null;
+    if (activePath && path.dirname(activePath) === uiSoundKindDir(kind)) {
+      const fileName = path.basename(activePath);
+      if (!list.some((f) => f.fileName === fileName)) {
+        list = [...list, { fileName, displayName: path.basename(activePath, path.extname(activePath)) }];
+        customUiSoundsChanged = true;
+      }
+    }
+    uiSounds[kind] = activePath;
+    customUiSounds[kind] = list;
+  }
+  if (customUiSoundsChanged) writeRawSettings({ custom_ui_sounds: customUiSounds });
+
   return {
     themeColor,
     fontPath,
@@ -194,6 +333,12 @@ function loadSettings() {
     timeFormat: data.time_format === '12h' ? '12h' : '24h',
     showSeconds: data.show_seconds === true,
     themeMode: data.theme_mode === 'light' ? 'light' : 'dark',
+    musicPath,
+    musicVolume: Number.isFinite(data.music_volume) ? Math.max(0, Math.min(1, data.music_volume)) : 0.5,
+    musicMuted: data.music_muted === true,
+    customMusic,
+    uiSounds,
+    customUiSounds,
   };
 }
 
@@ -329,6 +474,11 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // Without this, Chromium's default autoplay policy blocks the
+      // background music track from starting until the user has clicked
+      // something — this is the app's own launcher chrome, not a random
+      // website, so that restriction only gets in the way.
+      autoplayPolicy: 'no-user-gesture-required',
     },
   });
   mainWindow.setMenuBarVisibility(false);
@@ -363,7 +513,7 @@ app.on('window-all-closed', () => {
 });
 
 ipcMain.handle('get-state', () => {
-  const { themeColor, themeMode, fontPath, fontFamily, fontSize, customFonts, timezone, timeFormat, showSeconds } = loadSettings();
+  const { themeColor, themeMode, fontPath, fontFamily, fontSize, customFonts, timezone, timeFormat, showSeconds, musicPath, musicVolume, musicMuted, customMusic, uiSounds, customUiSounds } = loadSettings();
   return {
     apps: loadApps(),
     user: loadUser(),
@@ -376,6 +526,12 @@ ipcMain.handle('get-state', () => {
     timezone,
     timeFormat,
     showSeconds,
+    musicPath,
+    musicVolume,
+    musicMuted,
+    customMusic,
+    uiSounds,
+    customUiSounds,
     timezones: TIMEZONES,
     assetsDir: ASSETS_DIR,
   };
@@ -416,43 +572,10 @@ ipcMain.handle('choose-font-path', async () => {
     filters: [{ name: 'Fonts', extensions: ['ttf', 'otf', 'woff', 'woff2'] }],
   });
   if (result.canceled || result.filePaths.length === 0) return null;
-  const srcPath = result.filePaths[0];
-  const ext = path.extname(srcPath) || '.ttf';
-  const displayName = path.basename(srcPath, path.extname(srcPath)) || 'Custom Font';
-  const safeBase = displayName.replace(/[^A-Za-z0-9_-]+/g, '_') || 'font';
-
-  fs.mkdirSync(fontsDir(), { recursive: true });
   const settings = loadSettings();
-  const existingList = settings.customFonts;
-
-  // Reuse an existing stored copy if this exact file was already imported
-  // (same bytes), instead of piling up duplicate entries for the same font.
-  const srcBuf = fs.readFileSync(srcPath);
-  const duplicate = existingList.find((f) => {
-    try {
-      return fs.readFileSync(path.join(fontsDir(), f.fileName)).equals(srcBuf);
-    } catch {
-      return false;
-    }
-  });
-
-  let fileName;
-  if (duplicate) {
-    fileName = duplicate.fileName;
-  } else {
-    fileName = `${safeBase}${ext}`;
-    let counter = 2;
-    while (fs.existsSync(path.join(fontsDir(), fileName))) {
-      fileName = `${safeBase}_${counter}${ext}`;
-      counter += 1;
-    }
-    fs.writeFileSync(path.join(fontsDir(), fileName), srcBuf);
-  }
-
-  const customFonts = duplicate
-    ? existingList
-    : [...existingList, { fileName, displayName }];
-
+  const { fileName, displayName, list: customFonts } = importDedupedFile(
+    fontsDir(), result.filePaths[0], settings.customFonts, { fallbackBase: 'Custom Font', defaultExt: '.ttf' },
+  );
   const destPath = path.join(fontsDir(), fileName);
   writeRawSettings({ custom_fonts: customFonts, font_path: destPath, font_family: 'CustomUserFont' });
   return { path: destPath, fileName, displayName, customFonts };
@@ -462,9 +585,9 @@ ipcMain.handle('choose-font-path', async () => {
 // browser involved, since it's already sitting in fontsDir().
 ipcMain.handle('select-font', (_event, fileName) => {
   const settings = loadSettings();
-  const entry = settings.customFonts.find((f) => f.fileName === fileName);
-  if (!entry) return loadSettings();
-  writeRawSettings({ font_path: path.join(fontsDir(), fileName), font_family: 'CustomUserFont' });
+  const destPath = selectStoredFile(fontsDir(), settings.customFonts, fileName);
+  if (!destPath) return loadSettings();
+  writeRawSettings({ font_path: destPath, font_family: 'CustomUserFont' });
   return loadSettings();
 });
 
@@ -484,15 +607,127 @@ ipcMain.handle('set-font-scale', (_event, { fileName, scale }) => {
 ipcMain.handle('remove-font', (_event, fileName) => {
   const settings = loadSettings();
   const wasActive = settings.fontPath === path.join(fontsDir(), fileName);
-  const customFonts = settings.customFonts.filter((f) => f.fileName !== fileName);
-  try {
-    fs.unlinkSync(path.join(fontsDir(), fileName));
-  } catch {
-    // already gone
-  }
+  const { list: customFonts } = removeStoredFile(fontsDir(), settings.customFonts, fileName);
   writeRawSettings({
     custom_fonts: customFonts,
     ...(wasActive ? { font_path: null, font_family: null } : {}),
+  });
+  return loadSettings();
+});
+
+// Copies the picked audio file into the app's own data directory rather
+// than referencing it in place (same reasoning as choose-font-path: a
+// path into the user's own filesystem silently breaks the moment that
+// original file gets moved, renamed, or deleted). Every distinct track
+// imported is kept (not just the active one) and recorded in
+// custom_music, so Background Music can offer a "pick from what you've
+// already imported" list instead of forcing another trip through the
+// file browser every time.
+ipcMain.handle('choose-music-path', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose background music',
+    properties: ['openFile'],
+    filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'] }],
+  });
+  if (result.canceled || result.filePaths.length === 0) return loadSettings();
+  const settings = loadSettings();
+  const { fileName, list: customMusic } = importDedupedFile(
+    musicDir(), result.filePaths[0], settings.customMusic, { fallbackBase: 'Background Music', defaultExt: '.mp3' },
+  );
+  writeRawSettings({ custom_music: customMusic, music_path: path.join(musicDir(), fileName) });
+  return loadSettings();
+});
+
+// Activates a previously-imported track by its stored fileName — no file
+// browser involved, since it's already sitting in musicDir().
+ipcMain.handle('select-music', (_event, fileName) => {
+  const settings = loadSettings();
+  const destPath = selectStoredFile(musicDir(), settings.customMusic, fileName);
+  if (!destPath) return loadSettings();
+  writeRawSettings({ music_path: destPath });
+  return loadSettings();
+});
+
+// Removes a stored track (the file and its entry in custom_music). If it
+// was the active one, falls back to silence.
+ipcMain.handle('remove-music', (_event, fileName) => {
+  const settings = loadSettings();
+  const wasActive = settings.musicPath === path.join(musicDir(), fileName);
+  const { list: customMusic } = removeStoredFile(musicDir(), settings.customMusic, fileName);
+  writeRawSettings({
+    custom_music: customMusic,
+    ...(wasActive ? { music_path: null } : {}),
+  });
+  return loadSettings();
+});
+
+ipcMain.handle('set-music-volume', (_event, volume) => {
+  const clamped = Math.max(0, Math.min(1, Number(volume)));
+  writeRawSettings({ music_volume: Number.isFinite(clamped) ? clamped : 0.5 });
+  return loadSettings();
+});
+
+ipcMain.handle('set-music-muted', (_event, muted) => {
+  writeRawSettings({ music_muted: muted === true });
+  return loadSettings();
+});
+
+// Copies the picked audio file into this kind's own subfolder rather than
+// referencing it in place (same reasoning as choose-font-path/
+// choose-music-path). Every distinct sound imported for a kind is kept
+// (not just the active one) and recorded in custom_ui_sounds, so Menu
+// Sounds can offer a "pick from what's already been imported" list per
+// kind instead of forcing another trip through the file browser every time.
+ipcMain.handle('choose-ui-sound', async (_event, kind) => {
+  if (!UI_SOUND_KINDS.includes(kind)) return loadSettings();
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: `Choose a ${kind} sound`,
+    properties: ['openFile'],
+    filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'] }],
+  });
+  if (result.canceled || result.filePaths.length === 0) return loadSettings();
+  const settings = loadSettings();
+  const dir = uiSoundKindDir(kind);
+  const { fileName, list } = importDedupedFile(
+    dir, result.filePaths[0], settings.customUiSounds[kind], { fallbackBase: `${kind} sound`, defaultExt: '.mp3' },
+  );
+  const customUiSounds = { ...settings.customUiSounds, [kind]: list };
+  writeRawSettings({ custom_ui_sounds: customUiSounds, [`ui_sound_${kind}`]: path.join(dir, fileName) });
+  return loadSettings();
+});
+
+// Activates a previously-imported sound for this kind by its fileName —
+// no file browser involved, since it's already sitting in its subfolder.
+ipcMain.handle('select-ui-sound', (_event, { kind, fileName }) => {
+  if (!UI_SOUND_KINDS.includes(kind)) return loadSettings();
+  const settings = loadSettings();
+  const destPath = selectStoredFile(uiSoundKindDir(kind), settings.customUiSounds[kind], fileName);
+  if (!destPath) return loadSettings();
+  writeRawSettings({ [`ui_sound_${kind}`]: destPath });
+  return loadSettings();
+});
+
+// Reverts one kind back to its built-in synthesized tone, without
+// deleting anything already imported for it (distinct from remove-ui-sound
+// below, which deletes a specific imported file).
+ipcMain.handle('clear-ui-sound', (_event, kind) => {
+  if (!UI_SOUND_KINDS.includes(kind)) return loadSettings();
+  writeRawSettings({ [`ui_sound_${kind}`]: null });
+  return loadSettings();
+});
+
+// Removes one imported sound (the file and its custom_ui_sounds entry).
+// If it was the active one, falls back to the built-in synthesized tone.
+ipcMain.handle('remove-ui-sound', (_event, { kind, fileName }) => {
+  if (!UI_SOUND_KINDS.includes(kind)) return loadSettings();
+  const settings = loadSettings();
+  const dir = uiSoundKindDir(kind);
+  const wasActive = settings.uiSounds[kind] === path.join(dir, fileName);
+  const { list } = removeStoredFile(dir, settings.customUiSounds[kind], fileName);
+  const customUiSounds = { ...settings.customUiSounds, [kind]: list };
+  writeRawSettings({
+    custom_ui_sounds: customUiSounds,
+    ...(wasActive ? { [`ui_sound_${kind}`]: null } : {}),
   });
   return loadSettings();
 });
@@ -560,6 +795,57 @@ ipcMain.handle('update-user', (_event, { name, iconPath }) => {
   return next;
 });
 
+// Some Windows games ship a small bootstrap .exe that launches the real
+// game executable (often from the same install folder) and quits itself
+// within a second or two — plain spawn() only ever tracks that bootstrap,
+// so its 'exit' fires while the real game is just starting, and the
+// launcher would reshow itself (and resume background music) mid-relaunch
+// instead of when the game is actually done. Bounded and best-effort: any
+// PowerShell failure, or a folder too shallow to check safely (a drive
+// root, where "some process is running from here" is meaningless), just
+// falls back to the original immediate-reshow behavior; a match that
+// never clears (e.g. a lingering background service) times out after
+// RELAUNCH_MAX_WAIT_MS rather than wedging the launcher shut forever.
+const RELAUNCH_GRACE_MS = 2000;
+const RELAUNCH_POLL_MS = 4000;
+const RELAUNCH_MAX_WAIT_MS = 10 * 60 * 1000;
+
+function folderHasRunningProcess(dirPath, cb) {
+  // A bare StartsWith on the path string would also match a sibling folder
+  // that merely shares a text prefix (e.g. "C:\Games\Foo" matching a
+  // process running from "C:\Games\FooBar\") — anchoring to the directory
+  // plus its trailing separator makes this an actual path-containment
+  // check instead of a string-prefix one.
+  const anchor = dirPath.endsWith(path.sep) ? dirPath : dirPath + path.sep;
+  const psEscape = (s) => s.replace(/'/g, "''");
+  const script = [
+    `$dir = '${psEscape(anchor)}'`,
+    '$match = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase) }',
+    '$match.Count',
+  ].join('; ');
+  execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8' }, (err, stdout) => {
+    cb(!err && parseInt(String(stdout).trim(), 10) > 0);
+  });
+}
+
+function waitForRelaunchToClear(appPath, done) {
+  const dirPath = path.dirname(appPath);
+  // A drive root (or anything similarly shallow) is shared by far too much
+  // else on the system to mean anything as a "still running" signal.
+  const depth = dirPath.split(/[\\/]/).filter(Boolean).length;
+  if (depth < 2) { done(); return; }
+
+  const deadline = Date.now() + RELAUNCH_MAX_WAIT_MS;
+  const check = () => {
+    if (Date.now() > deadline) { done(); return; }
+    folderHasRunningProcess(dirPath, (running) => {
+      if (!running) { done(); return; }
+      setTimeout(check, RELAUNCH_POLL_MS);
+    });
+  };
+  setTimeout(check, RELAUNCH_GRACE_MS);
+}
+
 ipcMain.handle('launch-app', (_event, appPath) => {
   if (!appPath || !fs.existsSync(appPath)) {
     return { ok: false, error: `This app could not be found:\n${appPath}` };
@@ -577,6 +863,11 @@ ipcMain.handle('launch-app', (_event, appPath) => {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show();
       mainWindow.focus();
+      // Tells the renderer the launched app is done, independent of the
+      // playtime-tracking send below (which only fires when the launched
+      // path still matches a saved game) — background music resumes on
+      // this event regardless of whether that entry lookup succeeds.
+      mainWindow.webContents.send('game-exited');
     }
     // Playtime is recorded on exit, after the launchApp promise below has
     // already resolved (the game was just launched, not yet closed) — the
@@ -592,7 +883,10 @@ ipcMain.handle('launch-app', (_event, appPath) => {
       }
     }
   };
-  child.on('exit', reshow);
+  child.on('exit', () => {
+    if (process.platform === 'win32') waitForRelaunchToClear(appPath, reshow);
+    else reshow();
+  });
   child.on('error', reshow);
   return { ok: true };
 });

@@ -3,6 +3,9 @@ const state = {
   user: { name: 'Player', iconPath: null },
   fontPath: null, fontFamily: null, fontSize: 'medium', customFonts: [],
   timezone: null, timeFormat: '24h', timezones: [], showSeconds: false,
+  musicPath: null, musicVolume: 0.5, musicMuted: false, customMusic: [],
+  uiSounds: { move: null, confirm: null, back: null },
+  customUiSounds: { move: [], confirm: [], back: [] },
 };
 const ui = { screen: 'menu', updateGameSlug: null, selectedSlug: null };
 
@@ -55,6 +58,169 @@ function fileUrl(p) {
   let pathName = p.replace(/\\/g, '/');
   if (!pathName.startsWith('/')) pathName = '/' + pathName;
   return 'file://' + encodeURI(pathName);
+}
+
+// Same Windows-backslash-vs-Mac/Linux-slash split every "is this stored
+// path the active one" check needs (font/music/ui-sound path -> fileName).
+function baseName(p) {
+  return p ? p.split(/[\\/]/).pop() : null;
+}
+
+// One looping <audio> element for the whole app session — created once
+// (setupBackgroundMusic, called from init) rather than per-render, since
+// render() rebuilds the DOM from scratch on every screen change and a
+// re-created <audio> would restart the track from 0 each time.
+let bgMusicEl = null;
+
+function setupBackgroundMusic() {
+  bgMusicEl = new Audio();
+  bgMusicEl.loop = true;
+  applyMusicSource(state.musicPath);
+  applyMusicVolume();
+  playBackgroundMusic();
+}
+
+function applyMusicSource(musicPath) {
+  if (!bgMusicEl) return;
+  bgMusicEl.src = musicPath ? fileUrl(musicPath) : '';
+  // Reassigning .src to a string equal to its current value is a no-op in
+  // Chromium (no reload fires) — e.g. switching straight back to a track
+  // that's already active, or any other case where the resolved URL
+  // happens to match. .load() unconditionally restarts the resource
+  // selection algorithm, so the switch always actually takes effect.
+  bgMusicEl.load();
+}
+
+// Reads state directly (rather than taking a volume argument) so mute and
+// volume can never fall out of sync — every caller that changes either one
+// just calls this again instead of having to recompute "muted ? 0 : x" itself.
+function applyMusicVolume() {
+  if (bgMusicEl) bgMusicEl.volume = state.musicMuted ? 0 : state.musicVolume;
+}
+
+function playBackgroundMusic() {
+  if (!bgMusicEl || !state.musicPath) return;
+  bgMusicEl.play().catch(() => {}); // ignored: e.g. no supported audio device
+}
+
+function pauseBackgroundMusic() {
+  if (bgMusicEl) bgMusicEl.pause();
+}
+
+// ---------- UI navigation sound effects ----------
+//
+// Synthesized with the Web Audio API (short oscillator blips) rather than
+// shipped audio files — these are built-in app chrome, not user content
+// like the background track, so there's nothing to import or store.
+//
+// Every screen's keyboard/gamepad navigation already funnels through one
+// of three shared constructors (createNav/create2DNav/createRowNav below),
+// and gamepad input is itself dispatched as a real KeyboardEvent that
+// reaches the exact same handleKey code (see dispatchSyntheticKey) — so
+// hooking sound into those three functions covers every screen and every
+// modal in the app in one place, for both input methods, rather than
+// needing a call added at each of their many use sites.
+let uiAudioCtx = null;
+const uiSoundLastPlayed = { move: 0, confirm: 0, back: 0 };
+// A physical key held down auto-repeats far faster than these blips are
+// meant to be heard (and gamepad repeat is a steady 130ms — see
+// GAMEPAD_REPEAT_RATE_MS) — without a floor, holding a direction spams
+// overlapping copies of the same tone into a buzz instead of distinct taps.
+const UI_SOUND_MIN_GAP_MS = { move: 70, confirm: 150, back: 150 };
+
+// Repeated "move" plays close together (holding a direction, flicking a
+// stick) climb in pitch each step — like a scroll wheel or rolodex
+// speeding up — instead of every tick sounding identical, which reads as
+// one static beep repeating rather than an impression of scrolling.
+// Pausing longer than the reset window starts the climb over from 0.
+let moveStreak = 0;
+let moveStreakLastPlayed = 0;
+const MOVE_STREAK_RESET_MS = 400;
+const MOVE_STREAK_MAX = 8;
+
+function playUiTone(steps) {
+  if (!uiAudioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    uiAudioCtx = new Ctx();
+  }
+  if (uiAudioCtx.state === 'suspended') uiAudioCtx.resume().catch(() => {});
+  const ctx = uiAudioCtx;
+  const now = ctx.currentTime;
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0, now);
+  gain.connect(ctx.destination);
+  let t = now;
+  for (const { freq, duration, peak } of steps) {
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, t);
+    osc.connect(gain);
+    // Linear ramp in/out of each note (instead of an on/off step) avoids
+    // the sharp click a sudden amplitude jump produces.
+    gain.gain.linearRampToValueAtTime(peak, t + duration * 0.15);
+    gain.gain.linearRampToValueAtTime(0, t + duration);
+    osc.start(t);
+    osc.stop(t + duration);
+    t += duration;
+  }
+}
+
+// A user-imported file replaces the synthesized tone for that one kind
+// (main.js's choose-ui-sound/remove-ui-sound). One <audio> element per
+// kind, reused across plays and rewound to 0 rather than recreated each
+// time — recreating it would just be a second way to hit the exact same
+// "assigning an unchanged .src is a no-op" pitfall the music track already
+// ran into (see applyMusicSource). The element itself is thrown away (not
+// just its src updated) whenever the active file for that kind changes, so
+// there's nothing stale left playing from the previous import.
+const customUiAudioEls = { move: null, confirm: null, back: null };
+
+function resetCustomUiSound(kind) {
+  customUiAudioEls[kind] = null;
+}
+
+// streak (0..MOVE_STREAK_MAX) nudges the pitch up a notch per step for the
+// synthesized tone, or the playback rate for a custom file — playbackRate
+// is a crude pitch shift (it also speeds up the sound itself), but it's
+// the only lever a plain <audio> element has, and at these small steps it
+// reads the same way: each tick in a held scroll sits a bit higher than
+// the last.
+function playCustomUiSound(kind, streak) {
+  let el = customUiAudioEls[kind];
+  if (!el) {
+    el = new Audio(fileUrl(state.uiSounds[kind]));
+    customUiAudioEls[kind] = el;
+  }
+  el.currentTime = 0;
+  el.playbackRate = kind === 'move' ? 1 + streak * 0.06 : 1;
+  el.play().catch(() => {});
+}
+
+function playUiSound(kind) {
+  const now = performance.now();
+  if (now - uiSoundLastPlayed[kind] < UI_SOUND_MIN_GAP_MS[kind]) return;
+  uiSoundLastPlayed[kind] = now;
+
+  let streak = 0;
+  if (kind === 'move') {
+    streak = now - moveStreakLastPlayed < MOVE_STREAK_RESET_MS ? Math.min(MOVE_STREAK_MAX, moveStreak + 1) : 0;
+    moveStreak = streak;
+    moveStreakLastPlayed = now;
+  }
+
+  if (state.uiSounds[kind]) { playCustomUiSound(kind, streak); return; }
+  if (kind === 'move') playUiTone([{ freq: 620 + streak * 26, duration: 0.045, peak: 0.16 }]);
+  else if (kind === 'confirm') playUiTone([{ freq: 520, duration: 0.055, peak: 0.2 }, { freq: 880, duration: 0.08, peak: 0.2 }]);
+  else if (kind === 'back') playUiTone([{ freq: 440, duration: 0.06, peak: 0.18 }, { freq: 300, duration: 0.09, peak: 0.18 }]);
+}
+
+// Bypasses the anti-spam throttle above — that gate exists to stop a held
+// key/gamepad-repeat from layering the same tone into a buzz, not to limit
+// a deliberate, one-off preview click on the Settings screen.
+function previewUiSound(kind) {
+  uiSoundLastPlayed[kind] = 0;
+  playUiSound(kind);
 }
 
 function formatClock(tz) {
@@ -272,11 +438,12 @@ function createNav(items, { onEscape, vertical = false, onFocus, initialIndex = 
   if (items.length) apply();
   function move(delta) {
     if (!items.length) return;
+    if (items.length > 1) playUiSound('move');
     index = (index + delta + items.length) % items.length;
     apply();
   }
   function activate() {
-    if (items.length) items[index].activate();
+    if (items.length) { playUiSound('confirm'); items[index].activate(); }
   }
   const prevKey = vertical ? 'ArrowUp' : 'ArrowLeft';
   const nextKey = vertical ? 'ArrowDown' : 'ArrowRight';
@@ -284,7 +451,7 @@ function createNav(items, { onEscape, vertical = false, onFocus, initialIndex = 
     if (e.key === prevKey) { move(-1); e.preventDefault(); return; }
     if (e.key === nextKey) { move(1); e.preventDefault(); return; }
     if (e.key === 'Enter' || e.key === ' ') { activate(); e.preventDefault(); return; }
-    if (e.key === 'Escape' && onEscape) { onEscape(); e.preventDefault(); }
+    if (e.key === 'Escape' && onEscape) { playUiSound('back'); onEscape(); e.preventDefault(); }
   }
   return { handleKey, move, activate, getIndex: () => index };
 }
@@ -302,11 +469,13 @@ function create2DNav(items, cols, { onEscape } = {}) {
   if (items.length) apply();
   function moveTo(newIndex) {
     if (!items.length) return;
-    index = Math.max(0, Math.min(items.length - 1, newIndex));
+    const clamped = Math.max(0, Math.min(items.length - 1, newIndex));
+    if (clamped !== index) playUiSound('move');
+    index = clamped;
     apply();
   }
   function activate() {
-    if (items.length) items[index].activate();
+    if (items.length) { playUiSound('confirm'); items[index].activate(); }
   }
   function handleKey(e) {
     switch (e.key) {
@@ -316,7 +485,7 @@ function create2DNav(items, cols, { onEscape } = {}) {
       case 'ArrowUp': moveTo(Math.max(0, index - cols)); e.preventDefault(); break;
       case 'Enter':
       case ' ': activate(); e.preventDefault(); break;
-      case 'Escape': if (onEscape) { onEscape(); e.preventDefault(); } break;
+      case 'Escape': if (onEscape) { playUiSound('back'); onEscape(); e.preventDefault(); } break;
       default: break;
     }
   }
@@ -346,18 +515,23 @@ function createRowNav(rows, { onEscape } = {}) {
   if (rows.length && rows[0].length) apply();
   function moveRow(delta) {
     if (!rows.length) return;
-    row = Math.max(0, Math.min(rows.length - 1, row + delta));
+    const newRow = Math.max(0, Math.min(rows.length - 1, row + delta));
+    if (newRow !== row) playUiSound('move');
+    row = newRow;
     col = Math.min(col, Math.max(0, currentRow().length - 1));
     apply();
   }
   function moveCol(delta) {
     const r = currentRow();
     if (r.length < 2) return;
-    col = Math.max(0, Math.min(r.length - 1, col + delta));
+    const newCol = Math.max(0, Math.min(r.length - 1, col + delta));
+    if (newCol !== col) playUiSound('move');
+    col = newCol;
     apply();
   }
   function activate() {
-    currentRow()[col]?.activate();
+    const item = currentRow()[col];
+    if (item) { playUiSound('confirm'); item.activate(); }
   }
   function handleKey(e) {
     switch (e.key) {
@@ -367,7 +541,7 @@ function createRowNav(rows, { onEscape } = {}) {
       case 'ArrowLeft': moveCol(-1); e.preventDefault(); break;
       case 'Enter':
       case ' ': activate(); e.preventDefault(); break;
-      case 'Escape': if (onEscape) { onEscape(); e.preventDefault(); } break;
+      case 'Escape': if (onEscape) { playUiSound('back'); onEscape(); e.preventDefault(); } break;
       default: break;
     }
   }
@@ -706,7 +880,7 @@ function tileIconNode(entry) {
   }
   const emojiMap = {
     remove: '🗑', color: '🎨', steamgriddb: '🖼', back: '←', settings: '⚙', quit: '⏻',
-    updateGame: '📝', updateUser: '👤', font: '🔤', time: '🕒',
+    updateGame: '📝', updateUser: '👤', font: '🔤', time: '🕒', music: '🎵', uiSounds: '🔊',
   };
   const span = document.createElement('span');
   span.className = 'letter';
@@ -839,6 +1013,32 @@ function buildScreenTitle(text) {
   return el;
 }
 
+// Shared by every "pick from a list of imported files" screen (Change
+// Font, Background Music's track list, Menu Sounds) — each row shows a
+// label, an Active/Select status, and an optional Remove button. Returns
+// {el, activate} directly in the shape createRowNav's rows arrays want.
+function buildSelectableRow({ label, isActive, onActivate, onRemove }) {
+  const row = document.createElement('div');
+  row.className = 'timezone-row' + (isActive ? ' active' : '');
+  const name = document.createElement('div');
+  name.className = 'timezone-row-name';
+  name.textContent = label;
+  const status = document.createElement('div');
+  status.className = 'timezone-row-diff';
+  status.textContent = isActive ? 'Active' : 'Select';
+  row.append(name, status);
+  if (onRemove) {
+    const removeBtn = document.createElement('div');
+    removeBtn.className = 'timezone-row-diff';
+    removeBtn.textContent = 'Remove';
+    removeBtn.style.cursor = 'pointer';
+    removeBtn.addEventListener('click', (e) => { e.stopPropagation(); onRemove(); });
+    row.append(removeBtn);
+  }
+  row.addEventListener('click', onActivate);
+  return { el: row, activate: onActivate };
+}
+
 // Persistent header used by every screen: player icon+name (click to open
 // Update Player), clock, a settings-gear shortcut, and power. Sub-screens
 // show their own heading in the body via buildScreenTitle instead of the
@@ -922,6 +1122,8 @@ function render() {
   else if (ui.screen === 'updateUser') renderUpdateUser(appEl);
   else if (ui.screen === 'font') renderFont(appEl);
   else if (ui.screen === 'time') renderTime(appEl);
+  else if (ui.screen === 'music') renderMusic(appEl);
+  else if (ui.screen === 'uiSounds') renderUiSounds(appEl);
 }
 
 /* ---------- home: games sidebar ---------- */
@@ -935,6 +1137,8 @@ function settingsEntries() {
     { kind: 'updateUser', name: 'Update User' },
     { kind: 'font', name: 'Change Font' },
     { kind: 'time', name: 'Time Setting' },
+    { kind: 'music', name: 'Background Music' },
+    { kind: 'uiSounds', name: 'Menu Sounds' },
     { kind: 'steamgriddb', name: 'Cover Art Key' },
     { kind: 'back', name: 'Back' },
   ];
@@ -948,13 +1152,31 @@ async function activateSettingsEntry(entry) {
   else if (entry.kind === 'updateUser') { ui.screen = 'updateUser'; render(); }
   else if (entry.kind === 'font') { ui.screen = 'font'; render(); }
   else if (entry.kind === 'time') { ui.screen = 'time'; render(); }
+  else if (entry.kind === 'music') { ui.screen = 'music'; render(); }
+  else if (entry.kind === 'uiSounds') { ui.screen = 'uiSounds'; render(); }
   else if (entry.kind === 'steamgriddb') await manageSteamGridDbKey();
   else if (entry.kind === 'back') { ui.screen = 'menu'; render(); }
 }
 
 async function launchGame(entry) {
-  const result = await window.api.launchApp(entry.path);
-  if (!result.ok) await showError('Launch failed', result.error);
+  pauseBackgroundMusic();
+  let result;
+  try {
+    result = await window.api.launchApp(entry.path);
+  } catch (e) {
+    // The IPC call itself failed rather than resolving with {ok:false} —
+    // no process was ever spawned, so (same as the !result.ok case below)
+    // there's no 'game-exited' event coming later to resume music.
+    playBackgroundMusic();
+    await showError('Launch failed', e?.message || String(e));
+    return;
+  }
+  if (!result.ok) {
+    // The app never actually started, so there's no 'game-exited' event
+    // coming later to resume it — do that here instead.
+    playBackgroundMusic();
+    await showError('Launch failed', result.error);
+  }
 }
 
 async function addGameFlow() {
@@ -1163,12 +1385,16 @@ function renderMenu(appEl) {
     },
   });
 
+  // This screen runs its own list/play zone state machine instead of one
+  // shared nav constructor, so — unlike every other screen — its sounds
+  // need to be called out explicitly here rather than coming for free from
+  // createNav/create2DNav/createRowNav.
   currentKeyHandler = (e) => {
     if (zone === 'play') {
-      if (e.key === 'ArrowLeft' || e.key === 'Escape') { focusList(); e.preventDefault(); return; }
+      if (e.key === 'ArrowLeft' || e.key === 'Escape') { playUiSound('back'); focusList(); e.preventDefault(); return; }
       if (e.key === 'Enter' || e.key === ' ') {
         const entry = entries.find((en) => en.kind === 'game' && en.slug === ui.selectedSlug);
-        if (entry) launchGame(entry);
+        if (entry) { playUiSound('confirm'); launchGame(entry); }
         e.preventDefault();
         return;
       }
@@ -1176,6 +1402,7 @@ function renderMenu(appEl) {
     }
     const focused = entries[listNav.getIndex()];
     if ((e.key === 'ArrowRight' || e.key === 'Enter' || e.key === ' ') && focused?.kind === 'game') {
+      playUiSound('move');
       focusPlay();
       e.preventDefault();
       return;
@@ -1516,25 +1743,12 @@ function renderFont(appEl) {
   // Windows font_path uses backslashes (path.join on the main-process
   // side), so a plain endsWith('/'+fileName) would never match there —
   // compare basenames on either separator instead.
-  const activeFontFileName = state.fontPath ? state.fontPath.split(/[\\/]/).pop() : null;
+  const activeFontFileName = baseName(state.fontPath);
 
   const fontList = document.createElement('div');
   fontList.className = 'timezone-list';
   const fontRows = state.customFonts.map((font) => {
     const isActive = font.fileName === activeFontFileName;
-    const row = document.createElement('div');
-    row.className = 'timezone-row' + (isActive ? ' active' : '');
-    const name = document.createElement('div');
-    name.className = 'timezone-row-name';
-    name.textContent = font.displayName;
-    const status = document.createElement('div');
-    status.className = 'timezone-row-diff';
-    status.textContent = isActive ? 'Active' : 'Select';
-    const removeBtn = document.createElement('div');
-    removeBtn.className = 'timezone-row-diff';
-    removeBtn.textContent = 'Remove';
-    removeBtn.style.cursor = 'pointer';
-    row.append(name, status, removeBtn);
     const activateFont = async () => {
       const data = await window.api.selectFont(font.fileName);
       applyCustomFont(data.fontPath, data.fontFamily);
@@ -1544,18 +1758,17 @@ function renderFont(appEl) {
       state.customFonts = data.customFonts;
       render();
     };
-    row.addEventListener('click', activateFont);
-    removeBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
+    const removeFont = async () => {
       const data = await window.api.removeFont(font.fileName);
       if (!data.fontPath) { applyCustomFont(null, null); applyCustomFontScale(1); }
       state.fontPath = data.fontPath;
       state.fontFamily = data.fontFamily;
       state.customFonts = data.customFonts;
       render();
-    });
-    fontList.appendChild(row);
-    return { el: row, activate: activateFont };
+    };
+    const row = buildSelectableRow({ label: font.displayName, isActive, onActivate: activateFont, onRemove: removeFont });
+    fontList.appendChild(row.el);
+    return row;
   });
   if (!state.customFonts.length) {
     const empty = document.createElement('div');
@@ -1750,6 +1963,259 @@ function renderTime(appEl) {
   currentKeyHandler = (e) => nav.handleKey(e);
 
   setHints([{ key: '↑↓', label: 'Navigate' }, { key: '←→', label: 'Choose' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+}
+
+/* ---------- background music ---------- */
+
+function renderMusic(appEl) {
+  const header = buildHeader();
+  const body = document.createElement('div');
+  body.className = 'subscreen-body';
+  body.appendChild(buildScreenTitle('Background Music'));
+
+  const subtitle = document.createElement('div');
+  subtitle.className = 'screen-subtitle';
+  subtitle.textContent = state.musicPath
+    ? 'It plays in the menu and pauses while a game is running.'
+    : 'No music set — it plays in the menu and pauses while a game is running.';
+  body.appendChild(subtitle);
+
+  const form = document.createElement('div');
+  form.className = 'update-form';
+
+  const importRow = document.createElement('div');
+  importRow.className = 'update-row';
+  importRow.textContent = 'Import Music File…';
+  importRow.addEventListener('click', async () => {
+    const previousPath = state.musicPath;
+    const data = await window.api.chooseMusicPath();
+    state.musicPath = data.musicPath;
+    state.customMusic = data.customMusic;
+    // Cancelling the file picker returns the same musicPath unchanged —
+    // skip reapplying it, or the already-playing track would restart
+    // from 0 for no reason.
+    if (state.musicPath !== previousPath) {
+      applyMusicSource(state.musicPath);
+      playBackgroundMusic();
+    }
+    render();
+  });
+  form.append(importRow);
+
+  // Every track ever imported stays listed here (stored in the app's own
+  // data dir — see main.js's choose-music-path), so switching back to one
+  // used before is a click on its row, not another trip through the file
+  // browser to find that file again.
+  const trackListLabel = document.createElement('div');
+  trackListLabel.className = 'screen-subtitle';
+  trackListLabel.textContent = 'Imported Tracks';
+  trackListLabel.style.margin = '16px 0 0 10px';
+
+  // Windows music_path uses backslashes (path.join on the main-process
+  // side), so a plain endsWith('/'+fileName) would never match there —
+  // compare basenames on either separator instead.
+  const activeFileName = baseName(state.musicPath);
+
+  const trackList = document.createElement('div');
+  trackList.className = 'timezone-list';
+  const trackRows = state.customMusic.map((track) => {
+    const isActive = track.fileName === activeFileName;
+    const activateTrack = async () => {
+      if (isActive) return; // already playing this one — don't restart it from 0
+      const data = await window.api.selectMusic(track.fileName);
+      state.musicPath = data.musicPath;
+      applyMusicSource(state.musicPath);
+      playBackgroundMusic();
+      render();
+    };
+    const removeTrack = async () => {
+      const data = await window.api.removeMusic(track.fileName);
+      state.musicPath = data.musicPath;
+      state.customMusic = data.customMusic;
+      if (isActive) { pauseBackgroundMusic(); applyMusicSource(null); }
+      render();
+    };
+    const row = buildSelectableRow({ label: track.displayName, isActive, onActivate: activateTrack, onRemove: removeTrack });
+    trackList.appendChild(row.el);
+    return row;
+  });
+  if (!state.customMusic.length) {
+    const empty = document.createElement('div');
+    empty.className = 'game-list-empty';
+    empty.textContent = 'No music imported yet.';
+    trackList.appendChild(empty);
+  }
+
+  const volumeLabel = document.createElement('div');
+  volumeLabel.className = 'screen-subtitle';
+  volumeLabel.textContent = state.musicMuted
+    ? `Volume — Muted (${Math.round(state.musicVolume * 100)}% when unmuted)`
+    : `Volume — ${Math.round(state.musicVolume * 100)}%`;
+  volumeLabel.style.margin = '16px 0 0 10px';
+
+  const volumeRow = document.createElement('div');
+  volumeRow.className = 'size-options';
+  const adjustVolume = async (delta) => {
+    const newVolume = Math.round(Math.max(0, Math.min(1, state.musicVolume + delta)) * 20) / 20;
+    const data = await window.api.setMusicVolume(newVolume);
+    state.musicVolume = data.musicVolume;
+    applyMusicVolume();
+    render();
+  };
+  const quieterBtn = document.createElement('div');
+  quieterBtn.className = 'option-btn';
+  quieterBtn.textContent = '− Quieter';
+  quieterBtn.addEventListener('click', () => adjustVolume(-0.05));
+  const louderBtn = document.createElement('div');
+  louderBtn.className = 'option-btn';
+  louderBtn.textContent = '+ Louder';
+  louderBtn.addEventListener('click', () => adjustVolume(0.05));
+  volumeRow.append(quieterBtn, louderBtn);
+
+  // A dedicated toggle rather than just "turn Volume down to 0%" — muting
+  // this way remembers the volume you had, so unmuting doesn't come back
+  // silent or force you to re-pick a level.
+  const muteRow = document.createElement('div');
+  muteRow.className = 'update-row';
+  muteRow.textContent = state.musicMuted ? 'Unmute' : 'Mute';
+  muteRow.addEventListener('click', async () => {
+    const data = await window.api.setMusicMuted(!state.musicMuted);
+    state.musicMuted = data.musicMuted;
+    applyMusicVolume();
+    render();
+  });
+
+  const goBack = () => { ui.screen = 'settings'; render(); };
+  const backBtn = document.createElement('div');
+  backBtn.className = 'detail-btn secondary';
+  backBtn.textContent = 'Back';
+  backBtn.addEventListener('click', goBack);
+
+  body.append(form, trackListLabel, trackList, volumeLabel, volumeRow, muteRow, backBtn);
+  appEl.append(header, body);
+
+  const rows = [
+    [{ el: importRow, activate: () => importRow.click() }],
+    ...trackRows.map((r) => [r]),
+    [{ el: quieterBtn, activate: () => quieterBtn.click() }, { el: louderBtn, activate: () => louderBtn.click() }],
+    [{ el: muteRow, activate: () => muteRow.click() }],
+    [{ el: backBtn, activate: goBack }],
+  ];
+  const nav = createRowNav(rows, { onEscape: goBack });
+  currentKeyHandler = (e) => nav.handleKey(e);
+
+  setHints([{ key: '↑↓', label: 'Navigate' }, { key: '←→', label: 'Choose' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+}
+
+/* ---------- menu (nav) sounds ---------- */
+
+const UI_SOUND_LABELS = { move: 'Move', confirm: 'Confirm', back: 'Back' };
+
+function renderUiSounds(appEl) {
+  const header = buildHeader();
+  const body = document.createElement('div');
+  body.className = 'subscreen-body';
+  body.appendChild(buildScreenTitle('Menu Sounds'));
+
+  const subtitle = document.createElement('div');
+  subtitle.className = 'screen-subtitle';
+  subtitle.textContent = 'Played moving around this menu — import your own sound for any category, or pick Default for the built-in tone. Selecting a row plays it so you can hear it.';
+  body.appendChild(subtitle);
+
+  const rows = [];
+
+  ['move', 'confirm', 'back'].forEach((kind) => {
+    const sectionLabel = document.createElement('div');
+    sectionLabel.className = 'screen-subtitle';
+    sectionLabel.textContent = `${UI_SOUND_LABELS[kind]} Sound`;
+    sectionLabel.style.margin = '16px 0 0 10px';
+    body.appendChild(sectionLabel);
+
+    const form = document.createElement('div');
+    form.className = 'update-form';
+    const importRow = document.createElement('div');
+    importRow.className = 'update-row';
+    importRow.textContent = 'Import Custom Sound…';
+    importRow.addEventListener('click', async () => {
+      const data = await window.api.chooseUiSound(kind);
+      state.uiSounds = data.uiSounds;
+      state.customUiSounds = data.customUiSounds;
+      resetCustomUiSound(kind);
+      previewUiSound(kind);
+      render();
+    });
+    form.append(importRow);
+    body.appendChild(form);
+    rows.push([{ el: importRow, activate: () => importRow.click() }]);
+
+    const activeFileName = baseName(state.uiSounds[kind]);
+
+    const list = document.createElement('div');
+    list.className = 'timezone-list';
+
+    // A synthetic first entry standing in for "no custom file" — folds
+    // reverting to the built-in tone into the same select-from-a-list
+    // interaction as every real imported sound below it, instead of a
+    // separate reset control.
+    const isDefaultActive = !activeFileName;
+    const activateDefault = async () => {
+      if (isDefaultActive) { previewUiSound(kind); return; }
+      const data = await window.api.clearUiSound(kind);
+      state.uiSounds = data.uiSounds;
+      resetCustomUiSound(kind);
+      previewUiSound(kind);
+      render();
+    };
+    const defaultRow = buildSelectableRow({ label: 'Default (Built-in)', isActive: isDefaultActive, onActivate: activateDefault });
+    list.appendChild(defaultRow.el);
+    rows.push([defaultRow]);
+
+    state.customUiSounds[kind].forEach((sound) => {
+      const isActive = sound.fileName === activeFileName;
+      const activateSound = async () => {
+        if (isActive) { previewUiSound(kind); return; }
+        const data = await window.api.selectUiSound(kind, sound.fileName);
+        state.uiSounds = data.uiSounds;
+        resetCustomUiSound(kind);
+        previewUiSound(kind);
+        render();
+      };
+      const removeSound = async () => {
+        const data = await window.api.removeUiSound(kind, sound.fileName);
+        state.uiSounds = data.uiSounds;
+        state.customUiSounds = data.customUiSounds;
+        if (isActive) resetCustomUiSound(kind);
+        render();
+      };
+      const row = buildSelectableRow({ label: sound.displayName, isActive, onActivate: activateSound, onRemove: removeSound });
+      list.appendChild(row.el);
+      rows.push([row]);
+    });
+
+    if (!state.customUiSounds[kind].length) {
+      const empty = document.createElement('div');
+      empty.className = 'game-list-empty';
+      empty.textContent = 'No custom sounds imported yet.';
+      list.appendChild(empty);
+    }
+
+    body.appendChild(list);
+  });
+
+  const goBack = () => { ui.screen = 'settings'; render(); };
+  const backBtn = document.createElement('div');
+  backBtn.className = 'detail-btn secondary';
+  backBtn.textContent = 'Back';
+  backBtn.addEventListener('click', goBack);
+  body.appendChild(backBtn);
+  rows.push([{ el: backBtn, activate: goBack }]);
+
+  appEl.append(header, body);
+
+  const nav = createRowNav(rows, { onEscape: goBack });
+  currentKeyHandler = (e) => nav.handleKey(e);
+
+  setHints([{ key: '↑↓', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
 }
 
 /* ---------- menu color ---------- */
@@ -1991,19 +2457,27 @@ async function init() {
   state.timeFormat = data.timeFormat;
   state.timezones = data.timezones;
   state.showSeconds = data.showSeconds;
+  state.musicPath = data.musicPath;
+  state.musicVolume = data.musicVolume;
+  state.musicMuted = data.musicMuted;
+  state.customMusic = data.customMusic;
+  state.uiSounds = data.uiSounds;
+  state.customUiSounds = data.customUiSounds;
   state.theme = Theme.computeTheme(state.themeColor, state.themeMode);
   applyTheme();
   if (state.fontPath && state.fontFamily) {
     applyCustomFont(state.fontPath, state.fontFamily);
-    const activeFileName = state.fontPath.split(/[\\/]/).pop();
+    const activeFileName = baseName(state.fontPath);
     applyCustomFontScale(state.customFonts.find((f) => f.fileName === activeFileName)?.scale || 1);
   }
   applyFontSize(state.fontSize);
+  setupBackgroundMusic();
 
   window.api.onAppsUpdated((apps) => {
     state.apps = apps;
     if (ui.screen === 'menu' || ui.screen === 'detail') render();
   });
+  window.api.onGameExited(() => playBackgroundMusic());
 
   requestAnimationFrame(pollGamepads);
   render();
