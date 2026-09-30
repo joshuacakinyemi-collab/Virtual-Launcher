@@ -796,54 +796,78 @@ ipcMain.handle('update-user', (_event, { name, iconPath }) => {
 });
 
 // Some Windows games ship a small bootstrap .exe that launches the real
-// game executable (often from the same install folder) and quits itself
-// within a second or two — plain spawn() only ever tracks that bootstrap,
-// so its 'exit' fires while the real game is just starting, and the
-// launcher would reshow itself (and resume background music) mid-relaunch
-// instead of when the game is actually done. Bounded and best-effort: any
-// PowerShell failure, or a folder too shallow to check safely (a drive
-// root, where "some process is running from here" is meaningless), just
-// falls back to the original immediate-reshow behavior; a match that
-// never clears (e.g. a lingering background service) times out after
-// RELAUNCH_MAX_WAIT_MS rather than wedging the launcher shut forever.
-const RELAUNCH_GRACE_MS = 2000;
+// game executable and quits itself within a second or two — plain
+// spawn() only ever tracks that bootstrap, so its 'exit' fires while the
+// real game is just starting, and the launcher would reshow itself (and
+// resume background music) mid-relaunch instead of when the game is
+// actually done.
+//
+// This used to detect a relaunch by checking whether anything was still
+// running out of the launched app's own install folder, but that breaks
+// two ways: a real game whose actual executable lives in a *different*
+// folder than the one the user pointed Virtual Launcher at (common —
+// stub launchers routinely live in Program Files while the real game
+// runs from an entirely separate install/library location) is invisible
+// to it, and an unrelated process merely sharing the folder name (fixed
+// once, but a sign the whole approach is fragile) can false-positive.
+// Tracking actual process IDs instead of paths has neither problem: a PID
+// snapshot taken right after launch, diffed against a fresh snapshot the
+// moment the bootstrap exits, finds whatever new process(es) appeared
+// during the launch — wherever they happen to live on disk — and reshow
+// waits for those specific PIDs to clear instead.
+//
+// Bounded and best-effort throughout: any PowerShell failure just falls
+// back to immediate reshow, and PIDs that never clear (e.g. a lingering
+// background service) time out after RELAUNCH_MAX_WAIT_MS rather than
+// wedging the launcher shut forever.
+const RELAUNCH_RECHECK_MS = 500;
 const RELAUNCH_POLL_MS = 4000;
 const RELAUNCH_MAX_WAIT_MS = 10 * 60 * 1000;
 
-function folderHasRunningProcess(dirPath, cb) {
-  // A bare StartsWith on the path string would also match a sibling folder
-  // that merely shares a text prefix (e.g. "C:\Games\Foo" matching a
-  // process running from "C:\Games\FooBar\") — anchoring to the directory
-  // plus its trailing separator makes this an actual path-containment
-  // check instead of a string-prefix one.
-  const anchor = dirPath.endsWith(path.sep) ? dirPath : dirPath + path.sep;
-  const psEscape = (s) => s.replace(/'/g, "''");
-  const script = [
-    `$dir = '${psEscape(anchor)}'`,
-    '$match = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase) }',
-    '$match.Count',
-  ].join('; ');
-  execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8' }, (err, stdout) => {
-    cb(!err && parseInt(String(stdout).trim(), 10) > 0);
+function listRunningPids() {
+  return new Promise((resolve) => {
+    execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', "(Get-Process -ErrorAction SilentlyContinue).Id -join ','"], { encoding: 'utf8' }, (err, stdout) => {
+      if (err) { resolve(null); return; }
+      const ids = String(stdout).trim().split(',').map((s) => parseInt(s, 10)).filter(Number.isFinite);
+      resolve(new Set(ids));
+    });
   });
 }
 
-function waitForRelaunchToClear(appPath, done) {
-  const dirPath = path.dirname(appPath);
-  // A drive root (or anything similarly shallow) is shared by far too much
-  // else on the system to mean anything as a "still running" signal.
-  const depth = dirPath.split(/[\\/]/).filter(Boolean).length;
-  if (depth < 2) { done(); return; }
+function anyPidsRunning(pids) {
+  return new Promise((resolve) => {
+    if (!pids.length) { resolve(false); return; }
+    const script = `(Get-Process -Id ${pids.join(',')} -ErrorAction SilentlyContinue).Count`;
+    execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8' }, (err, stdout) => {
+      resolve(!err && parseInt(String(stdout).trim(), 10) > 0);
+    });
+  });
+}
+
+async function waitForRelaunchToClear(basePids, done) {
+  if (!basePids) { done(); return; }
+  const newSincePids = async () => {
+    const postPids = await listRunningPids();
+    if (!postPids) return [];
+    return [...postPids].filter((pid) => !basePids.has(pid));
+  };
+
+  let newPids = await newSincePids();
+  if (!newPids.length) {
+    // The real game's process can appear a beat after the bootstrap's own
+    // exit event fires — one short recheck absorbs that race without
+    // adding a fixed delay to the (usual) case where nothing relaunches.
+    await new Promise((resolve) => setTimeout(resolve, RELAUNCH_RECHECK_MS));
+    newPids = await newSincePids();
+  }
+  if (!newPids.length) { done(); return; }
 
   const deadline = Date.now() + RELAUNCH_MAX_WAIT_MS;
-  const check = () => {
-    if (Date.now() > deadline) { done(); return; }
-    folderHasRunningProcess(dirPath, (running) => {
-      if (!running) { done(); return; }
-      setTimeout(check, RELAUNCH_POLL_MS);
-    });
+  const check = async () => {
+    if (Date.now() > deadline || !(await anyPidsRunning(newPids))) { done(); return; }
+    setTimeout(check, RELAUNCH_POLL_MS);
   };
-  setTimeout(check, RELAUNCH_GRACE_MS);
+  check();
 }
 
 ipcMain.handle('launch-app', (_event, appPath) => {
@@ -858,6 +882,10 @@ ipcMain.handle('launch-app', (_event, appPath) => {
   mainWindow.minimize();
   const startedAt = Date.now();
   const child = process.platform === 'darwin' ? spawn('open', ['-W', appPath]) : spawn(appPath, []);
+  // Kicked off now (not awaited here) so it's already resolved — or close
+  // to it — by the time 'exit' fires, rather than only starting the
+  // lookup after the bootstrap has already quit.
+  const basePidsPromise = process.platform === 'win32' ? listRunningPids() : null;
   const reshow = () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -884,7 +912,7 @@ ipcMain.handle('launch-app', (_event, appPath) => {
     }
   };
   child.on('exit', () => {
-    if (process.platform === 'win32') waitForRelaunchToClear(appPath, reshow);
+    if (basePidsPromise) basePidsPromise.then((basePids) => waitForRelaunchToClear(basePids, reshow));
     else reshow();
   });
   child.on('error', reshow);
@@ -919,58 +947,51 @@ ipcMain.handle('steamgriddb-search', async (_event, term) => {
   }
 });
 
+// Art listings come back a page at a time (the API's `page` param,
+// 0-based). Every result on the page is returned — the picker used to cut
+// this to the first 9 — and `hasMore` tells the picker whether to offer
+// "Load more". width/height/mime ride along so the picker can label each
+// option and play animated ones (whose thumb is a video, not an image).
+async function fetchSteamGridDbArt(kindPath, gameId, page, errorMessage) {
+  const key = loadSteamGridDbKey();
+  if (!key) return { ok: false, error: 'No SteamGridDB API key set.' };
+  try {
+    const res = await fetch(`${STEAMGRIDDB_BASE}/${kindPath}/game/${gameId}?page=${page}`, {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    const json = await res.json();
+    if (!res.ok || !json.success) return { ok: false, error: errorMessage };
+    const data = json.data || [];
+    const pageSize = json.limit || 50;
+    const hasMore = Number.isFinite(json.total)
+      ? (page + 1) * pageSize < json.total
+      : data.length >= pageSize;
+    return {
+      ok: true,
+      hasMore,
+      grids: data.map((g) => ({ id: g.id, url: g.url, thumb: g.thumb, width: g.width, height: g.height, mime: g.mime })),
+    };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 // SteamGridDB's actual "Grid" asset — Steam's own library cover art
 // (traditionally the tall 600x900 capsule, though some games also have
 // landscape-style grids). This is its own distinct picture now (not a
 // stand-in for the banner), so no dimension bias — offer whatever SteamGridDB
 // actually has.
-ipcMain.handle('steamgriddb-grids', async (_event, gameId) => {
-  const key = loadSteamGridDbKey();
-  if (!key) return { ok: false, error: 'No SteamGridDB API key set.' };
-  try {
-    const res = await fetch(`${STEAMGRIDDB_BASE}/grids/game/${gameId}`, {
-      headers: { Authorization: `Bearer ${key}` },
-    });
-    const json = await res.json();
-    if (!res.ok || !json.success) return { ok: false, error: 'Could not fetch SteamGridDB grid art.' };
-    return { ok: true, grids: (json.data || []).slice(0, 9).map((g) => ({ id: g.id, url: g.url, thumb: g.thumb })) };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-});
+ipcMain.handle('steamgriddb-grids', (_event, gameId, page = 0) =>
+  fetchSteamGridDbArt('grids', gameId, page, 'Could not fetch SteamGridDB grid art.'));
 
-ipcMain.handle('steamgriddb-icons', async (_event, gameId) => {
-  const key = loadSteamGridDbKey();
-  if (!key) return { ok: false, error: 'No SteamGridDB API key set.' };
-  try {
-    const res = await fetch(`${STEAMGRIDDB_BASE}/icons/game/${gameId}`, {
-      headers: { Authorization: `Bearer ${key}` },
-    });
-    const json = await res.json();
-    if (!res.ok || !json.success) return { ok: false, error: 'Could not fetch SteamGridDB icons.' };
-    return { ok: true, grids: (json.data || []).slice(0, 9).map((g) => ({ id: g.id, url: g.url, thumb: g.thumb })) };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-});
+ipcMain.handle('steamgriddb-icons', (_event, gameId, page = 0) =>
+  fetchSteamGridDbArt('icons', gameId, page, 'Could not fetch SteamGridDB icons.'));
 
 // SteamGridDB's "Hero" asset — their actual wide-banner category
 // (~1920x620), the dedicated source for the banner slot now that Grid is
 // its own separate picture instead of standing in for it.
-ipcMain.handle('steamgriddb-heroes', async (_event, gameId) => {
-  const key = loadSteamGridDbKey();
-  if (!key) return { ok: false, error: 'No SteamGridDB API key set.' };
-  try {
-    const res = await fetch(`${STEAMGRIDDB_BASE}/heroes/game/${gameId}`, {
-      headers: { Authorization: `Bearer ${key}` },
-    });
-    const json = await res.json();
-    if (!res.ok || !json.success) return { ok: false, error: 'Could not fetch SteamGridDB banner art.' };
-    return { ok: true, grids: (json.data || []).slice(0, 9).map((g) => ({ id: g.id, url: g.url, thumb: g.thumb })) };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-});
+ipcMain.handle('steamgriddb-heroes', (_event, gameId, page = 0) =>
+  fetchSteamGridDbArt('heroes', gameId, page, 'Could not fetch SteamGridDB banner art.'));
 
 // destPath is deterministic per (appPath, kind), so it gets overwritten on
 // every pick — this only tracks which URL last wrote each destPath, so

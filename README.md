@@ -1,11 +1,12 @@
 # Virtual-Launcher
 
 A console-style game launcher that skins your desktop apps and games as a
-big-screen menu — a sidebar of games you browse and select, a detail/Play
-screen for the one you land on, and a settings grid for everything else
-(adding games, cover art, your profile, fonts, the clock). Built to be fully
-controller-operable: every action lives in a navigable list, nothing is
-hidden behind a mouse-only button.
+big-screen dashboard — a row of game tiles you browse left and right, the
+focused game's banner art filling the screen behind its title and Play
+button, and a settings grid for everything else (adding games, cover art,
+your profile, colors, fonts, the clock, music and menu sounds). Built to be
+fully controller-operable: every action lives in a navigable row or list,
+nothing is hidden behind a mouse-only button.
 
 There are two versions in this repo:
 
@@ -63,30 +64,44 @@ cert), so the first launch will be blocked by the OS until you tell it that's fi
 
 ## What it does
 
-- **Games sidebar** — every added game, icon + name, always visible on the
-  home screen. Select one to open its **detail/Play screen**: cover art,
-  description, tags, total playtime, and Play/Cancel.
+- **Home dashboard** — every added game as a tile in one horizontal row,
+  with **Settings** and **Quit** as smaller system icons at the end of it.
+  Moving along the row swaps the backdrop to that game's banner art
+  (crossfaded) and shows its title, total playtime, cover (Grid) art, and a
+  **Play** button underneath. Focusing a game only previews it — launching
+  always goes through Play.
 - **Playtime tracking** — automatic. The launcher hides while a game runs
   and records how long it was open; no manual bookkeeping.
-- **Settings** — a wrapping grid, reached via the sidebar's own **Settings**
-  entry:
+- **Settings** — a wrapping grid of icon tiles, reached via the home row's
+  own **Settings** tile (or the gear in the header):
   - **Add Game** — pick any app/executable via a file browser. On macOS and
     Windows its real icon is extracted automatically; optionally search
     [SteamGridDB](https://www.steamgriddb.com) for cover art instead.
   - **Remove Game**
   - **Update Game** — edit name/description/tags, and change its icon or
     banner (SteamGridDB search, or any image file of your own).
-  - **Menu Color** — an R/G/B adjuster that recolors the whole UI (tiles,
-    header, ambient background glow) from one accent color.
+  - **Menu Color** — Dark/Light mode plus a palette of preset accent
+    colors (or a custom R/G/B one) that recolors the whole UI from a single
+    accent.
   - **Update User** — your profile name + icon shown in the header.
-  - **Change Font** — import your own font file, plus Small/Medium/Large
-    sizing.
+  - **Change Font** — import your own font files (every import stays
+    listed to switch back to), a per-font scale slider, plus
+    Small/Medium/Large text sizing.
   - **Time Setting** — timezone and 12h/24h format for the header clock
-    (display only — it doesn't touch your system clock).
+    (display only — it doesn't touch your system clock), with optional
+    seconds.
+  - **Background Music** — import tracks to loop in the menu (paused
+    automatically while a game runs), with a volume slider and mute.
+  - **Menu Sounds** — the move/confirm/back navigation sounds; keep the
+    built-in tones or import your own for each.
   - **Cover Art Key** — where you paste a free [SteamGridDB](https://www.steamgriddb.com/profile/preferences)
     API key. Stored outside the repo (see [Where your data lives](#where-your-data-lives)),
     never committed.
-- **Quit** — also a sidebar entry, with a confirm prompt.
+- **Quit** — the last tile on the home row (or the power icon in the
+  header), with a confirm prompt.
+
+Focus is remembered per screen: changing a setting keeps you on the row you
+changed, and backing out of a sub-screen lands on the entry you came from.
 
 ## Controller / keyboard support
 
@@ -96,19 +111,24 @@ polls the [Web Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gam
 PlayStation, and generic USB controllers all work identically on Windows,
 Linux, and macOS with zero platform-specific code:
 
-- **D-pad / left stick** — move through the sidebar, a settings/timezone
-  list, or the Settings grid (2D: all four directions)
+- **D-pad / left stick** — Left/Right along the home row (Down to jump to
+  Play, Up to go back), Up/Down through settings lists, all four
+  directions in the Settings grid, and Left/Right to move sliders (volume,
+  font scale) directly
 - **A / Cross** — activate the highlighted item (same as Enter)
 - **B / Circle** — back (same as Escape) — every sub-screen and modal has one
 - Holding a direction repeats after a short delay, like a held keyboard key
 
 Keyboard works everywhere the same actions do (arrows, Enter/Space, Escape),
 and a controller-to-keyboard mapper (Steam Input, DS4Windows, etc.) is no
-longer required — though one still works fine if you already use one.
+longer required — though one still works fine if you already use one. The
+footer's button hints switch from keyboard keys to the pad's **A**/**B**
+buttons whenever a controller is connected. The mouse works too: pointing
+at something moves the same single highlight the keyboard/controller uses.
 
 There's intentionally nothing clickable that isn't also reachable this way
-— the header (player name/icon, clock) is informational only; Settings and
-Quit live in the same navigable list as your games. The one gap: typing text
+— the header's player name, gear and power icons are mouse shortcuts only;
+Settings and Quit also live in the same navigable row as your games. The one gap: typing text
 (naming a game, writing a description) still needs a physical keyboard —
 there's no on-screen keyboard.
 

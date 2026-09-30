@@ -4,9 +4,11 @@ html, body {
   margin: 0;
   height: 100%;
   overflow: hidden;
-  font-family: var(--user-font, 'Segoe UI'), 'Segoe UI Variable Text', -apple-system, system-ui, 'Helvetica Neue', Arial, sans-serif;
-  color: var(--fg, #fff);
+  font-family: var(--user-font, -apple-system), BlinkMacSystemFont, 'Segoe UI Variable Display', 'Segoe UI', system-ui, 'Helvetica Neue', Arial, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
   user-select: none;
+  -webkit-font-smoothing: antialiased;
 }
 
 /* Size presets (Settings → Change Font) scale the whole page uniformly,
@@ -15,13 +17,21 @@ html, body {
    --font-scale (set per active custom font — see applyCustomFontScale in
    renderer.js) multiplies on top of the size preset: different font files
    render at very different apparent sizes for the same nominal font-size,
-   so a single Small/Medium/Large setting can't make every imported font
-   look right — each one remembers its own extra scale factor instead. */
-:root { --ui-size-zoom: 1; --font-scale: 1; }
+   so each one remembers its own extra scale factor. */
+:root { --ui-size-zoom: 1; --font-scale: 1; --screen-zoom: 1; }
 html[data-ui-size="small"] { --ui-size-zoom: 0.85; }
 html[data-ui-size="large"] { --ui-size-zoom: 1.15; }
-body { zoom: calc(var(--ui-size-zoom) * var(--font-scale)); }
+/* Big screens (a 1080p+ TV, a large monitor in fullscreen) scale the whole
+   menu up, the way a console UI is sized for couch distance rather than
+   staying desktop-sized with acres of empty space around it. */
+@media (min-width: 1600px) and (min-height: 900px) { :root { --screen-zoom: 1.25; } }
+@media (min-width: 2400px) and (min-height: 1350px) { :root { --screen-zoom: 1.6; } }
+body { zoom: calc(var(--ui-size-zoom) * var(--font-scale) * var(--screen-zoom)); }
 
+/* Theme colors are overwritten at runtime by applyTheme() (renderer.js);
+   these defaults only cover the first frame. Everything else below is
+   derived from them, so Menu Color and Light/Dark mode restyle the whole
+   UI without any per-mode rules. */
 :root {
   --bg: #0a0e14;
   --glow: #4a9be0;
@@ -31,1187 +41,1052 @@ body { zoom: calc(var(--ui-size-zoom) * var(--font-scale)); }
   --fg: #ffffff;
   --dim-fg: #8a95a5;
   --tile-fg: #ffffff;
-  --bubble-fg: #ffffff;
-  --bubble-fg-muted: #b7c0cc;
   --accent-fg: #ffffff;
+
+  --surface: color-mix(in srgb, var(--tile) 74%, transparent);
+  --surface-hi: color-mix(in srgb, var(--tile) 86%, var(--fg) 14%);
+  --line: color-mix(in srgb, var(--fg) 12%, transparent);
+  --line-strong: color-mix(in srgb, var(--fg) 28%, transparent);
+
+  /* The console focus cue: a gap ring in the background color, then a
+     solid ring in the foreground color, so it reads on any art or accent. */
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--fg);
+  --lift: 0 14px 34px -10px color-mix(in srgb, var(--glow) 55%, rgba(0,0,0,0.6));
+
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --gutter: clamp(18px, 5vw, 80px);
+  --footer-h: 48px;
 }
 
+/* ---------- background layers ---------- */
+
+/* Ambient accent glow. Only transform/opacity animate — the old version
+   animated `filter: blur()` on a full-viewport element, which re-rasterizes
+   the whole screen every frame and was the main source of stutter. */
 .bg {
   position: fixed;
   inset: 0;
   z-index: 0;
-  /* Explicit circle sizes matter here: a radial-gradient with no size
-     defaults to "farthest-corner", which on a full-viewport element makes
-     each "blob" balloon out to cover most of the screen — four of those
-     overlapping just wash the whole background into one flat color instead
-     of reading as distinct glowing spots. */
-  background:
-    radial-gradient(circle 32vmin at 15% 78%, color-mix(in srgb, var(--glow) 90%, white 12%) 0%, transparent 72%),
-    radial-gradient(circle 36vmin at 46% 92%, color-mix(in srgb, var(--glow) 90%, white 12%) 0%, transparent 72%),
-    radial-gradient(circle 30vmin at 76% 66%, color-mix(in srgb, var(--glow) 90%, white 12%) 0%, transparent 72%),
-    radial-gradient(circle 34vmin at 92% 88%, color-mix(in srgb, var(--glow) 90%, white 12%) 0%, transparent 72%),
-    linear-gradient(to bottom, var(--glow) 0%, var(--bg) 68%);
-  background-color: var(--bg);
-  filter: blur(38px) saturate(1.2);
-  transition: background 0.3s ease;
-  animation: ambient-breathe 11s ease-in-out infinite;
+  background: var(--bg);
+  overflow: hidden;
 }
 
-/* A signature corner wash distinct from the ambient blobs above — built
-   from var(--accent) (Settings → Menu Color's "Menu Color" tab) rather
-   than var(--glow), so it's a second, independently themeable part of the
-   background: changing the accent shifts this corner without touching the
-   glow-colored blobs. Deliberately a WIDE gradual fade, not a thin ring —
-   .bg's own 38px blur filter (below) completely washes out anything
-   narrower than that, no matter how opaque, since blur radius bigger than
-   a feature just diffuses it to nothing. */
+.bg::before, .bg::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  will-change: transform;
+}
+
 .bg::before {
+  width: 110vmax;
+  height: 110vmax;
+  right: -45vmax;
+  top: -65vmax;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--accent) 38%, transparent), transparent);
+  animation: drift-a 18s ease-in-out infinite alternate;
+}
+
+.bg::after {
+  width: 90vmax;
+  height: 90vmax;
+  left: -40vmax;
+  bottom: -60vmax;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--glow) 20%, transparent), transparent);
+  animation: drift-b 22s ease-in-out infinite alternate;
+}
+
+@keyframes drift-a {
+  from { transform: translate(0, 0) scale(1); }
+  to { transform: translate(-6vmax, 4vmax) scale(1.08); }
+}
+
+@keyframes drift-b {
+  from { transform: translate(0, 0) scale(1); }
+  to { transform: translate(5vmax, -3vmax) scale(1.1); }
+}
+
+/* Full-screen art of the focused game (showBackdrop in renderer.js). Each
+   image fades in over the previous one, then the scrim below keeps the
+   left and bottom dark enough for the title and footer to stay legible. */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.backdrop-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transform: scale(1.05);
+  transition: opacity 0.6s var(--ease), transform 1.4s var(--ease);
+}
+
+.backdrop-img.shown {
+  opacity: 0.85;
+  transform: scale(1);
+}
+
+.backdrop::after {
   content: '';
   position: absolute;
   inset: 0;
   z-index: 1;
-  background: radial-gradient(circle 60vmax at 100% 0%,
-    color-mix(in srgb, var(--accent) 85%, white 15%) 0%,
-    color-mix(in srgb, var(--accent) 65%, white 10%) 30%,
-    transparent 68%);
-  opacity: 0.8;
-  animation: ring-drift 16s ease-in-out infinite;
+  background:
+    linear-gradient(to top, var(--bg) 0%, color-mix(in srgb, var(--bg) 75%, transparent) 30%, transparent 65%),
+    linear-gradient(to right, color-mix(in srgb, var(--bg) 88%, transparent) 0%, color-mix(in srgb, var(--bg) 40%, transparent) 45%, transparent 75%),
+    linear-gradient(to bottom, color-mix(in srgb, var(--bg) 70%, transparent) 0%, transparent 22%);
 }
 
-/* A faint slow-drifting light sweep across the sky, the way Media
-   Center's Start background was never quite static. */
-.bg::after {
-  content: '';
-  position: absolute;
-  inset: -20% -40%;
-  z-index: 2;
-  background: linear-gradient(115deg, transparent 40%, rgba(255,255,255,0.06) 50%, transparent 60%);
-  animation: light-sweep 14s linear infinite;
-}
-
-@keyframes ambient-breathe {
-  0%, 100% { filter: blur(38px) saturate(1.1); }
-  50% { filter: blur(44px) saturate(1.3); }
-}
-
-@keyframes ring-drift {
-  0%, 100% { transform: scale(1) rotate(0deg); opacity: 0.65; }
-  50% { transform: scale(1.06) rotate(1.5deg); opacity: 0.85; }
-}
-
-@keyframes light-sweep {
-  0% { transform: translateX(-20%); }
-  100% { transform: translateX(20%); }
-}
-
+/* Not 100vh: body has `zoom` applied (Text Size / font scale), and vh is
+   measured against the un-zoomed viewport — a 100vh element would then
+   render zoom% larger than the window and overflow behind the footer.
+   100% (matching html/body's own height one level up) scales with zoom. */
 #app {
   position: relative;
   z-index: 1;
-  /* Not 100vh: body has `zoom` applied (Text Size / font scale), and vh is
-     measured against the true un-zoomed viewport — so a 100vh element
-     then renders zoom% *larger* than the real viewport once zoom scales
-     it, silently overflowing the bottom by exactly that excess (e.g. 15%
-     of the window height at the "Large" text size). That overflow was
-     invisible in a screen's normal state but became a real bug the
-     moment any screen needed to scroll: the scrollable content's own
-     bottom edge extended past the true viewport, behind the fixed footer
-     hint bar, instead of stopping short of it. 100% (matching html/body's
-     own height:100% one level up) scales consistently under zoom instead.
-  */
   height: 100%;
   display: flex;
   flex-direction: column;
 }
 
-/* Header */
-
-/* Aero-glass toolbar, the way Windows Media Center/WMP 12's title bar
-   reads as a lit glass strip rather than a flat panel — a glossy highlight
-   band over the top half, an accent-tinted gradient, and a hard dark seam
-   at the very bottom to separate it from the body. */
-.header {
-  position: relative;
-  height: clamp(52px, 8vh, 84px);
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 20px;
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--accent) 60%, white 28%) 0%,
-    color-mix(in srgb, var(--accent) 78%, black 6%) 55%,
-    color-mix(in srgb, var(--accent) 85%, black 28%) 100%);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.55), 0 4px 16px rgba(0,0,0,0.4);
+/* Arriving on a screen (not a same-screen re-render — see render()). */
+#app.screen-enter > .screen,
+#app.screen-enter > .home {
+  animation: screen-in 0.34s var(--ease) both;
 }
 
-.header::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  height: 46%;
-  background: linear-gradient(to bottom, rgba(255,255,255,0.4), rgba(255,255,255,0));
-  pointer-events: none;
+@keyframes screen-in {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
 }
 
-.header::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 2px;
-  background: linear-gradient(to right,
-    transparent, rgba(0,0,0,0.45) 15%, rgba(0,0,0,0.45) 85%, transparent);
-}
+/* ---------- icons ---------- */
 
-.header-left, .header-right {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.clock {
-  font-weight: 700;
-  font-size: 15px;
-  color: var(--accent-fg);
-  letter-spacing: 0.5px;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.25);
-}
-
-/* Body */
-
-.body {
-  flex: 1;
-  display: flex;
-  overflow: hidden;
-  padding-bottom: 46px;
-}
-
-.subscreen-body {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  padding: 0 10px 46px;
-}
-
-.screen-title {
-  display: inline-flex;
-  align-self: flex-start;
-  align-items: center;
-  padding: 10px 20px;
-  margin: 20px 0 16px 10px;
-  border-radius: 20px;
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--tile) 75%, white 20%) 0%,
-    var(--tile) 45%,
-    color-mix(in srgb, var(--tile) 85%, black 20%) 100%);
-  border: 1px solid color-mix(in srgb, white 35%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.45), 0 4px 10px rgba(0,0,0,0.4);
-  color: var(--tile-fg);
-  font-weight: 600;
-  font-size: 15px;
-}
-
-/* Footer button-hint bar — the button-glyph strip every console dashboard
-   (Xbox, PS3/PS4, WMC-on-360) shows so it reads as controller-driven,
-   not a desktop app with a mouse pointer as the primary input. */
-
-.footer-hints {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  /* Above .modal-backdrop (z-index 20) — otherwise every modal (Quit
-     confirm included) covers the only on-screen cue for what Enter/Escape/
-     arrows actually do, so a keyboard/gamepad user has no way to tell the
-     dialog is navigable at all without already knowing the convention. */
-  z-index: 21;
-  min-height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 22px;
-  padding: 0 24px;
-  background: linear-gradient(to top, rgba(0,0,0,0.4), transparent);
-  pointer-events: none;
-}
-
-.hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 12px;
-  color: var(--dim-fg);
-  font-weight: 500;
-}
-
-.hint-key {
+.icon, .tile-icon, .row-icon, .tile-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 20px;
-  min-height: 20px;
-  padding: 2px 6px;
-  border-radius: 5px;
-  background: linear-gradient(to bottom, rgba(255,255,255,0.22), rgba(255,255,255,0.06));
-  border: 1px solid rgba(255,255,255,0.28);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.3);
-  font-size: 11px;
+  flex: 0 0 auto;
+}
+
+.icon svg { width: 20px; height: 20px; }
+
+/* ---------- header ---------- */
+
+.header {
+  flex: 0 0 auto;
+  height: clamp(54px, 9vh, 78px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 var(--gutter);
+}
+
+.header-player {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 14px 4px 4px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+
+.header-player:hover { background: var(--surface); }
+
+.avatar {
+  flex: 0 0 auto;
+  width: clamp(30px, 5vh, 40px);
+  height: clamp(30px, 5vh, 40px);
+  border-radius: 50%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 800;
+  font-size: 15px;
+  box-shadow: 0 0 0 2px var(--line-strong);
+}
+
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+.header-player-name {
+  min-width: 0;
   font-weight: 700;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header-right {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.clock {
+  font-size: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-right: 10px;
+}
+
+.header-icon-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
   color: var(--fg);
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.header-icon-btn:hover { background: var(--surface-hi); }
+.header-icon-btn.power:hover { background: #d9423a; color: #fff; }
+
+/* ---------- home: game row + hero ---------- */
+
+.home {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  --game-tile: clamp(72px, 14vh, 148px);
+}
+
+/* The tiles scale up on focus, so the row needs vertical breathing room
+   inside its own scroll container (which clips on both axes once
+   overflow-x is set) for the enlarged tile and its ring. */
+.game-row-outer {
+  flex: 0 0 auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  scroll-padding-inline: var(--gutter);
+}
+
+.game-row-outer::-webkit-scrollbar { display: none; }
+
+.game-row {
+  display: flex;
+  align-items: center;
+  gap: clamp(10px, 1.4vw, 18px);
+  width: max-content;
+  padding: 18px var(--gutter) 22px;
+}
+
+.game-tile { width: var(--game-tile); }
+
+/* Settings/Quit sit apart from the games, and smaller, like a console's
+   system icons at the end of the game row. */
+.game-tile:not(.system) + .game-tile.system { margin-left: clamp(12px, 2vw, 28px); }
+.game-tile.system { width: calc(var(--game-tile) * 0.62); }
+.game-tile.system .tile-art { border-radius: 50%; background: var(--surface); }
+
+.game-tile.kbd-focus .tile-art { transform: scale(1.12); }
+.game-tile.system.kbd-focus .tile-art { transform: scale(1.18); }
+
+/* While Play has focus, the game it belongs to keeps a quieter outline so
+   it's still clear which tile the hero is showing. */
+.home.zone-play .game-tile.kbd-focus .tile-art {
+  transform: scale(1.04);
+  box-shadow: 0 0 0 2px var(--line-strong);
+}
+
+.hero {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 32px;
+  padding: 0 var(--gutter) calc(var(--footer-h) + clamp(12px, 4vh, 40px));
+}
+
+.hero-info {
+  min-width: 0;
+  max-width: 760px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hero-title {
+  font-size: clamp(28px, 7vh, 72px);
+  font-weight: 800;
+  line-height: 1.02;
+  letter-spacing: -0.02em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-shadow: 0 2px 24px color-mix(in srgb, var(--bg) 70%, transparent);
+}
+
+.hero-meta {
+  font-size: clamp(13px, 2vh, 16px);
+  color: var(--dim-fg);
+  font-weight: 600;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: clamp(8px, 2.4vh, 22px);
+}
+
+.hero-cover {
+  flex: 0 0 auto;
+  height: clamp(120px, 40vh, 400px);
+  aspect-ratio: 2 / 3;
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--line), 0 24px 60px -18px rgba(0,0,0,0.7);
+}
+
+.hero-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.hero-cover.empty {
+  display: grid;
+  place-items: center;
+  container-type: size;
+}
+
+.hero-cover.empty .letter { font-size: 40cqw; font-weight: 800; color: var(--dim-fg); }
+.hero-cover.empty .icon-img { width: 55%; height: auto; }
+
+.hero.hero-swap .hero-info { animation: hero-info-in 0.36s var(--ease) both; }
+.hero.hero-swap .hero-cover { animation: hero-cover-in 0.42s var(--ease) both; }
+
+@keyframes hero-info-in {
+  from { opacity: 0; transform: translateX(-14px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes hero-cover-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (max-height: 540px), (max-width: 760px) {
+  .hero-cover, .hero-cover.empty { display: none; }
+}
+
+/* Short windows: tighten the row and hero so the title and Play button
+   never ride up into the game row. */
+@media (max-height: 560px) {
+  .home { --game-tile: clamp(56px, 13vh, 80px); }
+  .game-row { padding: 10px var(--gutter) 14px; }
+  .hero { padding-bottom: calc(var(--footer-h) + 8px); }
+  .hero-info { gap: 4px; }
+  .hero-title { font-size: clamp(22px, 6vh, 32px); -webkit-line-clamp: 1; }
+  .hero-actions { margin-top: 8px; }
+  .play-btn { padding: 11px 32px; font-size: 16px; }
+  .screen-head { padding-top: 0; }
+}
+
+/* ---------- buttons ---------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px 28px;
+  border: none;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease), background 0.2s ease;
+}
+
+.btn.primary { background: var(--accent); color: var(--accent-fg); }
+.btn.secondary { background: var(--surface); color: var(--fg); }
+.btn:focus { outline: none; }
+
+.btn.kbd-focus {
+  transform: scale(1.05);
+  box-shadow: var(--focus-ring), var(--lift);
+}
+
+.btn.secondary.kbd-focus { background: var(--surface-hi); }
+
+.play-btn {
+  padding: 15px 46px;
+  font-size: 18px;
+}
+
+.play-btn .icon svg { width: 18px; height: 18px; }
+
+.back-btn {
+  align-self: flex-start;
+  margin-top: 26px;
+  padding: 11px 24px 11px 18px;
+}
+
+.back-btn .icon svg { width: 18px; height: 18px; }
+
+/* ---------- tiles ---------- */
+
+.tile {
+  --tile-size: clamp(108px, 14vw, 164px);
+  position: relative;
+  width: var(--tile-size);
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.tile-art {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 18px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  container-type: inline-size;
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--line);
+  color: var(--fg);
+  transition: transform 0.24s var(--ease), box-shadow 0.24s var(--ease), background 0.24s ease;
+}
+
+.tile.kbd-focus .tile-art {
+  transform: scale(1.07);
+  background: var(--surface-hi);
+  box-shadow: var(--focus-ring), var(--lift);
+}
+
+.tile-icon svg { width: 36cqw; height: 36cqw; }
+.tile-art .icon-img { width: 64%; height: 64%; object-fit: contain; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.35)); }
+.tile-art .letter { font-size: 42cqw; font-weight: 800; color: var(--fg); }
+
+.tile-art .swatch { position: absolute; inset: 0; }
+
+.tile-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--fg);
+  color: var(--bg);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+}
+
+.tile-badge svg { width: 14px; height: 14px; stroke-width: 3; }
+
+.tile-label {
+  max-width: 100%;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+  color: var(--dim-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.2s ease, transform 0.24s var(--ease);
+}
+
+.tile-action {
+  margin-top: -6px;
+  font-size: 12px;
+  color: var(--dim-fg);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.2s ease, transform 0.24s var(--ease);
+}
+
+.tile.kbd-focus .tile-label { color: var(--fg); transform: translateY(6px); }
+.tile.kbd-focus .tile-action { opacity: 1; transform: translateY(6px); }
+
+.tile-grid-outer { width: 100%; }
+
+.tile-grid {
+  display: grid;
+  /* auto-fill wraps to however many columns fit; countGridColumns() in
+     renderer.js measures the result so 2D nav matches what's on screen. */
+  grid-template-columns: repeat(auto-fill, clamp(108px, 14vw, 164px));
+  column-gap: clamp(16px, 2.2vw, 30px);
+  row-gap: 18px;
+  padding: 10px 8px;
 }
 
 .tile-strip-outer {
   width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
-  padding-bottom: 10px;
+  scrollbar-width: none;
 }
+
+.tile-strip-outer::-webkit-scrollbar { display: none; }
 
 .tile-strip {
   display: flex;
-  align-items: flex-end;
-  gap: 26px;
-  /* Top padding exists only to clear the bubble tooltip that pops up above
-     a focused tile — clamp() shrinks it (and the tile itself, in ancestor
-     rules) on short windows instead of eating a fixed 80px regardless of
-     how little vertical space there actually is. */
-  padding: clamp(40px, 11vh, 80px) 10px 14px;
+  gap: clamp(16px, 2.2vw, 30px);
   width: max-content;
+  padding: 12px 8px 18px;
 }
 
-/* Tiles — sizes below are responsive (clamp, not fixed px): fixed 184x210
-   tiles with 80px/90px of bubble-clearance padding around them meant the
-   Settings grid barely fit one row before requiring scroll on anything
-   smaller than a full-size desktop window (confirmed down to one row
-   visible, footer hints overlapping the tiles, at the app's own 640x420
-   minimum size). --tile-grow-w/h (defined here, referenced by the hover/
-   focus rule below) keep the "grows on focus" delta proportional to
-   whatever the resting size resolves to at the current viewport, instead
-   of jumping to another unrelated fixed size. */
-.tile-wrap {
-  position: relative;
-  width: clamp(125px, 19.5vw, 210px);
-  --tile-grow-w: clamp(125px, 19.5vw, 210px);
-  --tile-grow-h: clamp(91px, 15vh, 158px);
+/* ---------- sub-screens ---------- */
+
+.screen {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 var(--gutter);
+}
+
+.screen-head {
   flex: 0 0 auto;
+  padding: clamp(4px, 2.4vh, 24px) 0 clamp(10px, 2.4vh, 22px);
+}
+
+.screen-title {
+  font-size: clamp(24px, 5vh, 42px);
+  font-weight: 800;
+  letter-spacing: -0.015em;
+  line-height: 1.1;
+}
+
+.screen-subtitle {
+  margin-top: 6px;
+  max-width: 680px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--dim-fg);
+}
+
+/* Scrolls as one column; the small padding keeps focus rings (drawn
+   outside each row) from being clipped by the scroll container. */
+.screen-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: flex;
-  align-items: center;
-  cursor: pointer;
+  flex-direction: column;
+  align-items: stretch;
+  margin: 0 -8px;
+  padding: 6px 8px calc(var(--footer-h) + 24px);
+  scroll-padding: 12px 0 calc(var(--footer-h) + 16px);
 }
 
-.tile-anchor {
-  position: relative;
-  margin: 0 auto;
-}
+.screen-content > * { flex-shrink: 0; }
 
-.tile-surface {
-  position: relative;
-  width: clamp(110px, 17.5vw, 184px);
-  height: clamp(80px, 13.5vh, 138px);
-  margin: 0 auto;
-  border-radius: 12px;
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--tile) 78%, white 16%) 0%,
-    var(--tile) 42%,
-    color-mix(in srgb, var(--tile) 85%, black 22%) 100%);
-  border: 1px solid color-mix(in srgb, white 30%, transparent);
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.4),
-    inset 0 -8px 12px -8px rgba(0,0,0,0.55),
-    0 5px 10px rgba(0,0,0,0.4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  transition: width 0.18s ease, height 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
-}
+.screen-content > .list,
+.screen-content > .empty-note { max-width: 680px; }
 
-.tile-surface::before {
-  content: '';
-  position: absolute;
-  left: 5%;
-  right: 5%;
-  top: 6%;
-  height: 42%;
-  border-radius: 50% 50% 40% 40% / 65% 65% 35% 35%;
-  background: linear-gradient(to bottom, rgba(255,255,255,0.5), rgba(255,255,255,0));
-  pointer-events: none;
-  z-index: 2;
-}
-
-.tile-surface .icon-img {
-  width: clamp(46px, 9.5vh, 68px);
-  height: clamp(46px, 9.5vh, 68px);
-  object-fit: contain;
-  position: relative;
-  z-index: 1;
-  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.4));
-  transition: width 0.18s ease, height 0.18s ease;
-}
-
-.tile-surface .letter {
-  position: relative;
-  z-index: 1;
-  font-size: clamp(26px, 5.5vh, 40px);
-  font-weight: 600;
-  color: var(--tile-fg);
-  text-shadow: 0 1px 2px rgba(0,0,0,0.4);
-}
-
-.tile-wrap:hover .tile-surface, .tile-wrap.kbd-focus .tile-surface {
-  width: var(--tile-grow-w);
-  height: var(--tile-grow-h);
-  transform: translateY(-3px);
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.55),
-    inset 0 -8px 12px -8px rgba(0,0,0,0.5),
-    0 0 0 3px var(--accent),
-    0 0 36px 10px var(--glow),
-    0 10px 20px rgba(0,0,0,0.45);
-}
-
-.tile-wrap:hover .tile-surface .icon-img, .tile-wrap.kbd-focus .tile-surface .icon-img {
-  width: clamp(55px, 11.5vh, 82px);
-  height: clamp(55px, 11.5vh, 82px);
-}
-
-.tile-wrap:hover .tile-surface .letter, .tile-wrap.kbd-focus .tile-surface .letter {
-  font-size: clamp(32px, 6.8vh, 50px);
-}
-
-/* Bubble tooltip */
-
-.bubble {
-  position: absolute;
-  bottom: calc(100% + 9px);
-  left: 50%;
-  transform: translate(-50%, 6px);
-  width: max-content;
-  min-width: 90px;
-  max-width: 210px;
-  padding: 9px 16px;
-  border-radius: 12px;
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--tile-overlay) 80%, white 15%) 0%,
-    var(--tile-overlay) 60%,
-    color-mix(in srgb, var(--tile-overlay) 88%, black 15%) 100%);
-  border: 1px solid color-mix(in srgb, white 30%, transparent);
-  text-align: center;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s ease, transform 0.15s ease;
-  z-index: 5;
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.3),
-    0 4px 12px rgba(0,0,0,0.4);
-}
-
-.bubble::after {
-  content: '';
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border-width: 7px 7px 0 7px;
-  border-style: solid;
-  border-color: var(--tile-overlay) transparent transparent transparent;
-}
-
-.bubble-name {
-  font-weight: 700;
-  font-size: 15px;
-  color: var(--bubble-fg);
-  white-space: normal;
-  word-break: break-word;
-}
-
-.bubble-action {
+.section-label {
+  margin: 24px 0 10px 4px;
   font-size: 12px;
-  color: var(--bubble-fg-muted);
-  margin-top: 2px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--dim-fg);
 }
 
-.tile-wrap:hover .bubble, .tile-wrap.kbd-focus .bubble {
-  opacity: 1;
-  transform: translate(-50%, 0);
+.empty-note {
+  padding: 10px 4px;
+  font-size: 14px;
+  color: var(--dim-fg);
 }
 
-/* Modals */
+/* ---------- rows and lists ---------- */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.list + .list { margin-top: 6px; }
+
+.list.scroll {
+  max-height: 38vh;
+  overflow-y: auto;
+  margin: -4px;
+  padding: 4px;
+}
+
+.row, .list-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.18s ease, box-shadow 0.2s var(--ease), transform 0.2s var(--ease);
+}
+
+.row {
+  min-height: 54px;
+  padding: 14px 20px;
+  background: var(--surface);
+}
+
+.row.kbd-focus, .list-row.kbd-focus {
+  background: var(--surface-hi);
+  box-shadow: var(--focus-ring);
+}
+
+.row-icon { color: var(--dim-fg); }
+.row-icon svg { width: 20px; height: 20px; }
+
+.row-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.row-value {
+  max-width: 50%;
+  font-size: 14px;
+  color: var(--dim-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slider-row .row-label { flex: 0 0 auto; min-width: 96px; }
+.slider-row .row-value { min-width: 56px; text-align: right; font-variant-numeric: tabular-nums; }
+
+.slider {
+  position: relative;
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--line-strong);
+}
+
+.slider-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+
+.slider-row.muted .slider-fill { opacity: 0.35; }
+
+.slider-step {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--dim-fg);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.slider-step:hover { background: var(--line); color: var(--fg); }
+
+.list-row {
+  min-height: 46px;
+  padding: 11px 16px;
+  font-size: 14px;
+}
+
+.list-row.active {
+  background: color-mix(in srgb, var(--accent) 20%, var(--surface));
+  box-shadow: inset 3px 0 0 var(--accent);
+  font-weight: 700;
+}
+
+.list-row.active.kbd-focus { box-shadow: inset 3px 0 0 var(--accent), var(--focus-ring); }
+
+.list-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list-row-clock { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+
+.list-row-meta {
+  flex: 0 0 auto;
+  min-width: 72px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dim-fg);
+}
+
+.list-row.active .list-row-meta { color: var(--fg); }
+
+.list-row-remove {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dim-fg);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.list-row-remove:hover { background: #d9423a; color: #fff; box-shadow: none; }
+
+/* A connected segmented control (24-hour/12-hour, Off/On, Small/Medium/Large). */
+.option-group {
+  align-self: flex-start;
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: var(--surface);
+}
+
+.option-btn {
+  padding: 9px 22px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+  color: var(--dim-fg);
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.2s var(--ease);
+}
+
+.option-btn.active { background: var(--accent); color: var(--accent-fg); }
+.option-btn.kbd-focus { box-shadow: var(--focus-ring); color: var(--fg); }
+.option-btn.active.kbd-focus { color: var(--accent-fg); }
+
+/* ---------- footer button hints ---------- */
+
+/* Above .modal-backdrop (z-index 20) — otherwise every modal would cover
+   the only on-screen cue for what Enter/Escape/arrows do in it. */
+.footer-hints {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 21;
+  height: var(--footer-h);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 24px;
+  padding: 0 var(--gutter);
+  background: linear-gradient(to top, var(--bg) 0%, color-mix(in srgb, var(--bg) 92%, transparent) 55%, transparent);
+  pointer-events: none;
+}
+
+.hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dim-fg);
+}
+
+.hint-key {
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--surface-hi);
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--fg);
+}
+
+.hint-key.pad { width: 24px; padding: 0; border-radius: 50%; }
+.hint-key.pad-a { background: var(--fg); color: var(--bg); box-shadow: none; }
+.hint-key.pad-b { background: transparent; box-shadow: inset 0 0 0 2px var(--fg); }
+
+/* ---------- modals ---------- */
 
 .modal-backdrop {
   position: fixed;
   inset: 0;
   z-index: 20;
-  background: rgba(0,0,0,0.55);
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 16px 16px calc(var(--footer-h) + 8px);
+  background: color-mix(in srgb, var(--bg) 60%, rgba(0,0,0,0.45));
+  backdrop-filter: blur(8px);
+  animation: fade-in 0.18s ease both;
 }
 
 .modal {
-  position: relative;
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--tile) 80%, white 12%) 0%,
-    var(--tile) 40%,
-    color-mix(in srgb, var(--tile) 88%, black 18%) 100%);
-  border: 1px solid color-mix(in srgb, white 25%, transparent);
-  color: var(--tile-fg);
-  padding: 24px;
-  border-radius: 14px;
+  width: 100%;
   min-width: 300px;
-  max-width: 420px;
-  overflow: hidden;
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.3),
-    0 16px 50px rgba(0,0,0,0.55);
+  max-width: 460px;
+  max-height: 100%;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 28px;
+  border-radius: 20px;
+  background: var(--tile);
+  color: var(--tile-fg);
+  box-shadow: 0 0 0 1px var(--line), 0 30px 80px -20px rgba(0,0,0,0.7);
+  animation: modal-in 0.26s var(--ease) both;
 }
 
-.modal::before {
-  content: '';
-  position: absolute;
-  left: 3%;
-  right: 3%;
-  top: 0;
-  height: 30%;
-  background: linear-gradient(to bottom, rgba(255,255,255,0.16), rgba(255,255,255,0));
-  pointer-events: none;
+.modal.wide { max-width: 600px; }
+.modal > * { flex-shrink: 0; }
+.modal > .art-grid { flex-shrink: 1; min-height: 90px; }
+.modal :focus { outline: none; }
+
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to { opacity: 1; transform: none; }
 }
 
 .modal h3 {
   margin: 0 0 10px;
-  font-size: 17px;
+  font-size: 20px;
+  font-weight: 800;
 }
 
 .modal p {
-  margin: 0 0 4px;
+  margin: 0;
   font-size: 14px;
-  line-height: 1.4;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--tile-fg) 75%, transparent);
 }
 
 .modal label {
   display: block;
+  margin: 4px 0 8px;
   font-size: 13px;
-  color: var(--bubble-fg-muted);
-  margin-bottom: 6px;
+  color: color-mix(in srgb, var(--tile-fg) 70%, transparent);
 }
 
 .modal input[type="text"] {
   width: 100%;
-  padding: 9px 10px;
-  border-radius: 7px;
-  border: 1px solid rgba(255,255,255,0.2);
-  background: rgba(0,0,0,0.35);
-  color: #fff;
-  font-size: 14px;
-  outline: none;
+  padding: 12px 14px;
+  border: none;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg) 55%, var(--tile));
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--tile-fg);
+  font: inherit;
+  font-size: 15px;
+  transition: box-shadow 0.18s ease;
 }
 
-.modal input[type="text"]:focus {
-  border-color: var(--accent);
-}
-
-.modal.wide {
-  max-width: 560px;
-  width: 90vw;
-}
-
-.art-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  margin: 14px 0;
-  max-height: 45vh;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-/* Default (Grid): SteamGridDB's own tall capsule shape. */
-.art-thumb {
-  width: 100%;
-  aspect-ratio: 2 / 3;
-  object-fit: cover;
-  border-radius: 6px;
-  cursor: pointer;
-  border: 2px solid transparent;
-  transition: border-color 0.15s ease, transform 0.15s ease;
-}
-
-/* Icon: square — was previously referenced in renderer.js with no matching
-   rule here, so icon options were silently rendered squashed into the
-   Grid thumb's 2:3 box instead of their actual square shape. */
-.art-thumb-icon {
-  aspect-ratio: 1 / 1;
-  object-fit: contain;
-}
-
-/* Banner: SteamGridDB's wide Hero shape — spans the full picker width as
-   one row instead of being squeezed into a 2:3 grid cell (see the matching
-   1-column nav for this kind in showArtPicker). */
-.art-thumb-banner {
-  aspect-ratio: 920 / 430;
-  object-fit: cover;
-  grid-column: 1 / -1;
-}
-
-.art-thumb:hover, .art-thumb.kbd-focus {
-  border-color: var(--accent);
-  transform: scale(1.03);
-}
+.modal input[type="text"]:focus { box-shadow: inset 0 0 0 2px var(--accent); }
 
 .modal-buttons {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  margin-top: 18px;
+  margin-top: 24px;
 }
 
-.modal-buttons button {
-  padding: 9px 18px;
-  border-radius: 8px;
-  border: 1px solid color-mix(in srgb, white 25%, transparent);
-  font-size: 13px;
+.modal-buttons .btn { padding: 11px 24px; font-size: 14px; }
+.modal .btn.secondary { background: color-mix(in srgb, var(--tile-fg) 10%, transparent); color: var(--tile-fg); }
+
+.modal.loading {
+  width: auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 26px;
+}
+
+.modal.loading p { flex: 1; min-width: 0; }
+
+.spinner {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2.5px solid var(--line-strong);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* SteamGridDB art picker. Each kind gets cells shaped like its art (square
+   icons, tall 2:3 grids, wide ~3:1 banners) and auto-fill packs as many
+   per row as the dialog's width allows — showArtPicker measures the result
+   for 2D nav. */
+.modal.art-picker { max-width: min(920px, 100%); }
+
+.art-grid {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  max-height: min(62vh, 640px);
+  overflow-y: auto;
+  margin: 14px -6px 0;
+  padding: 6px;
+}
+
+.art-grid-icon { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+.art-grid-grid { grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); }
+.art-grid-banner { grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+
+.art-option {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
   cursor: pointer;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.3);
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
 }
 
-/* Every modal focuses some button purely so keydown events (real keyboard
-   and the gamepad code's synthetic dispatch, both targeting
-   document.activeElement) actually bubble into the modal's own listener —
-   not because that button's native focus ring should be the visible
-   indicator. .kbd-focus (or, for showCustomColorModal, .color-row.focused)
-   is the real one; suppress the native ring everywhere so a focused-but-
-   not-"kbd-focus" button (e.g. Apply in the custom color modal, focused
-   only to receive input while an R/G/B row is what's actually selected)
-   doesn't show a second, conflicting focus indicator. */
-.modal-buttons button:focus {
-  outline: none;
-}
-
-.modal-buttons button:hover, .modal-buttons button.kbd-focus {
-  transform: translateY(-1px);
-}
-
-.modal-buttons button.kbd-focus {
-  outline: none;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), 0 0 0 2px var(--accent), 0 0 14px 2px var(--glow);
-}
-
-.modal-buttons button.secondary {
-  background: linear-gradient(to bottom, rgba(255,255,255,0.18), rgba(255,255,255,0.06));
-  color: var(--fg);
-}
-
-.modal-buttons button.primary {
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--accent) 80%, white 25%) 0%,
-    var(--accent) 55%,
-    color-mix(in srgb, var(--accent) 85%, black 20%) 100%);
-  color: var(--accent-fg);
-  font-weight: 600;
-}
-
-.modal-buttons button.primary:hover {
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.5), 0 0 14px 2px var(--glow);
-}
-
-/* Menu color screen — preset swatch grid (see buildColorGrid in
-   renderer.js) reuses .settings-grid/.tile-wrap; the rules below this
-   point are only the custom-color modal's R/G/B sliders. */
-
-/* color set inline per-swatch (buildColorGrid, renderer.js) via
-   Theme.readableFg(entry.hex) — a fixed color here would go unreadable
-   against light presets like Golden Yellow. */
-.color-swatch-check {
+.art-option-media {
   position: relative;
-  z-index: 1;
-  font-size: 40px;
-  font-weight: 700;
-  text-shadow: 0 1px 3px rgba(0,0,0,0.6);
-}
-
-.mode-tile-check {
-  position: relative;
-  z-index: 1;
-  font-size: 32px;
-  font-weight: 700;
-  color: var(--tile-fg);
-}
-
-.color-preview {
-  width: 100px;
-  height: 100px;
+  width: 100%;
   border-radius: 10px;
-  margin: 4px auto 18px;
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.4),
-    0 0 0 3px rgba(255,255,255,0.25),
-    0 8px 24px rgba(0,0,0,0.4);
+  overflow: hidden;
+  background: color-mix(in srgb, var(--tile-fg) 7%, transparent);
+  transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+
+.art-grid-icon .art-option-media { aspect-ratio: 1; }
+.art-grid-grid .art-option-media { aspect-ratio: 2 / 3; }
+.art-grid-banner .art-option-media { aspect-ratio: 1920 / 620; }
+
+/* contain, not cover: the whole picture is visible whatever its shape. */
+.art-option-media img, .art-option-media video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.art-option.kbd-focus .art-option-media {
+  transform: scale(1.04);
+  box-shadow: var(--focus-ring);
+}
+
+.art-option-meta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 16px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--tile-fg) 60%, transparent);
+}
+
+.art-option-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 1;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 10px;
+}
+
+/* "Load more" sits in the grid as one more cell, the same shape as the
+   options around it. */
+.art-more .art-option-media { display: none; }
+.art-more {
+  justify-content: center;
+  align-items: center;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--tile-fg) 7%, transparent);
+  color: var(--tile-fg);
+  font-size: 13px;
+  font-weight: 700;
+  transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+.art-grid-icon .art-more { aspect-ratio: 1; }
+.art-grid-grid .art-more { aspect-ratio: 2 / 3; }
+.art-grid-banner .art-more { aspect-ratio: 1920 / 620; }
+.art-more.kbd-focus { transform: scale(1.04); box-shadow: var(--focus-ring); }
+.art-more.loading { opacity: 0.6; }
+.art-more-icon svg { width: 26px; height: 26px; }
+
+/* Custom accent color modal. */
+.color-preview {
+  width: 96px;
+  height: 96px;
+  margin: 8px auto 20px;
+  border-radius: 20px;
+  box-shadow: 0 0 0 1px var(--line), 0 14px 34px -10px rgba(0,0,0,0.6);
+  transition: background 0.1s linear;
 }
 
 .color-rows {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  width: 100%;
-  max-width: 360px;
+  gap: 6px;
 }
 
 .color-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 2px solid transparent;
-  cursor: pointer;
-}
-
-.color-row.focused {
-  border-color: var(--accent);
-}
-
-.color-row-label {
-  width: 55px;
-  font-size: 13px;
-  color: var(--fg);
-}
-
-.color-bar {
-  flex: 1;
-  height: 22px;
-  border-radius: 4px;
-  background: #1a1a1a;
-  position: relative;
-  overflow: hidden;
-  cursor: pointer;
-}
-
-.color-bar-fill {
-  position: absolute;
-  top: 0; left: 0; bottom: 0;
-  width: 0%;
-  background: #ffffff;
-}
-
-.color-row-value {
-  width: 34px;
-  text-align: right;
-  font-size: 13px;
-  color: var(--fg);
-}
-
-/* Scrollbars: thin, theme-tinted */
-
-::-webkit-scrollbar { height: 10px; width: 10px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--tile-overlay); border-radius: 6px; }
-
-/* Header player icon + name (click to open Update Player) */
-
-.header-player-icon {
-  width: clamp(30px, 5vh, 52px);
-  height: clamp(30px, 5vh, 52px);
-  border-radius: 50%;
-  overflow: hidden;
-  background: var(--tile);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  font-size: 16px;
-  color: var(--tile-fg);
-  border: 1px solid color-mix(in srgb, white 30%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.3);
-  cursor: pointer;
-  transition: box-shadow 0.15s ease;
-}
-
-.header-player-icon:hover { box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), 0 0 0 2px rgba(255,255,255,0.5); }
-
-.header-player-icon img { width: 100%; height: 100%; object-fit: cover; }
-
-/* Boxed like the wireframe's username field — still just a label (Update
-   Player is a full screen, not an inline edit), but reads as a
-   clickable control instead of plain text. */
-.header-player-box {
-  padding: 6px 16px;
-  border-radius: 8px;
-  background: rgba(0,0,0,0.18);
-  border: 1px solid color-mix(in srgb, white 30%, transparent);
-  cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
-}
-
-.header-player-box:hover { background: rgba(0,0,0,0.28); border-color: rgba(255,255,255,0.55); }
-
-.header-player-name {
-  font-weight: 600;
-  font-size: 14px;
-  color: var(--accent-fg);
-  text-shadow: 0 1px 2px rgba(0,0,0,0.25);
-}
-
-/* Settings gear / Power icon buttons — mouse convenience mirroring the
-   sidebar's Settings/Quit entries (see buildHeader's comment). */
-.header-icon-btn {
-  width: clamp(30px, 5vh, 48px);
-  height: clamp(30px, 5vh, 48px);
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 16px;
-  cursor: pointer;
-  background: rgba(0,0,0,0.18);
-  border: 1px solid color-mix(in srgb, white 30%, transparent);
-  color: var(--accent-fg);
-  transition: background 0.15s ease, transform 0.12s ease;
-}
-
-.header-icon-btn:hover { background: rgba(0,0,0,0.3); transform: translateY(-1px); }
-
-.header-power-btn {
-  background: linear-gradient(to bottom, #e0473f 0%, #c62f28 55%, #a5211b 100%);
-  border-color: rgba(255,255,255,0.4);
-  color: #ffffff;
-}
-
-.header-power-btn:hover { box-shadow: 0 0 12px 2px rgba(224,71,63,0.7); }
-
-/* Games: vertical list */
-
-/* Library nav pane — a distinct frosted glass panel bounded from the
-   detail view, the way WMP's Library tree sits in its own strip rather
-   than floating on the same surface as the content it describes. */
-.game-list-outer {
-  flex: 0 0 clamp(200px, 22vw, 400px);
-  max-width: clamp(200px, 22vw, 400px);
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 18px 12px 20px;
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--tile) 60%, transparent) 0%,
-    color-mix(in srgb, var(--tile) 30%, transparent) 100%);
-  backdrop-filter: blur(20px) saturate(1.3);
-  border-right: 1px solid color-mix(in srgb, white 16%, transparent);
-  box-shadow: inset -1px 0 0 rgba(0,0,0,0.3), 6px 0 24px rgba(0,0,0,0.25);
-}
-
-.game-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.game-list-empty {
-  color: var(--dim-fg);
-  font-size: 15px;
-  padding: 20px 10px;
-}
-
-.game-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 14px;
-  border-radius: 10px;
-  cursor: pointer;
-  border: 2px solid transparent;
-  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
-}
-
-.game-row:hover, .game-row.kbd-focus {
-  background: color-mix(in srgb, var(--tile) 55%, transparent);
-  border-color: color-mix(in srgb, white 30%, transparent);
-  transform: translateX(4px);
-}
-
-/* Persistent Aero-glass selection pill — the currently previewed game
-   stays highlighted even after the pointer leaves, like the highlighted
-   row in Steam's library list or WMP's now-playing item. */
-.game-row.selected {
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--accent) 55%, white 22%) 0%,
-    color-mix(in srgb, var(--accent) 75%, black 8%) 100%);
-  border-color: color-mix(in srgb, white 45%, transparent);
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.5),
-    0 4px 14px rgba(0,0,0,0.35),
-    0 0 18px 2px var(--glow);
-}
-
-.game-row.selected .game-row-name { color: var(--accent-fg); font-weight: 700; }
-
-.game-row-thumb {
-  position: relative;
-  width: 64px;
-  height: 48px;
-  flex: 0 0 auto;
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--tile);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), 0 2px 6px rgba(0,0,0,0.35);
-}
-
-.game-row-thumb .icon-img { width: 40px; height: 40px; object-fit: contain; }
-.game-row-thumb .letter { font-size: 20px; font-weight: 600; color: var(--tile-fg); }
-
-.game-row-name {
-  min-width: 0;
-  flex: 1;
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.game-row-settings {
-  margin-top: 14px;
-  padding-top: 24px;
-  border-top: 1px solid rgba(255,255,255,0.15);
-}
-
-/* Settings: wrapping grid (reuses .tile-wrap/.tile-surface from the tile
-   strip, just laid out in a CSS grid instead of a horizontal flex row) */
-
-.settings-grid-outer {
-  flex: 1;
-  overflow: auto;
-}
-
-.settings-grid {
-  display: grid;
-  /* Wraps to however many columns actually fit the window instead of a
-     fixed 4 — countGridColumns() in renderer.js measures the result so
-     keyboard/gamepad nav always matches what's on screen. The 125px floor
-     matches .tile-wrap's own responsive minimum (clamp(125px, 19.5vw,
-     210px)) so a narrow window actually gets more, smaller columns instead
-     of the track staying pinned at the old fixed 170px minimum while the
-     tile inside it shrank — that combination was real dead space, not
-     more content fitting. */
-  grid-template-columns: repeat(auto-fill, minmax(125px, 210px));
-  column-gap: 26px;
-  /* Row gap and top padding exist only to clear the bubble tooltip above a
-     focused tile — both shrink on short windows instead of a fixed 80px/
-     90px regardless of how little vertical room there is. That fixed
-     amount was the main reason the grid needed scrolling almost
-     immediately on anything smaller than a full desktop window. */
-  row-gap: clamp(50px, 11vh, 90px);
-  padding: clamp(40px, 11vh, 80px) 20px 30px;
-  justify-content: start;
-}
-
-/* Game detail pane — a Steam-library-style hero: the banner is the
-   backdrop, the icon badge overlaps its bottom-left corner, and the
-   title sits in the scrim next to it, instead of icon/banner as two
-   separate boxes side by side. */
-
-.detail-pane {
-  flex: 1;
-  min-width: 0;
-  overflow-y: auto;
-  padding: 22px 28px 30px;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
-/* Grid + banner as their own side-by-side boxes (grid left, banner right),
-   per the app's wireframe — not a single hero with the icon overlapping
-   the banner's corner. */
-
-.detail-top-row {
-  display: flex;
-  gap: 18px;
-  flex: 0 0 auto;
-  width: 100%;
-  height: clamp(140px, 30vh, 320px);
-}
-
-.detail-grid-box, .detail-banner-box {
-  border-radius: 16px;
-  overflow: hidden;
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--tile) 78%, white 16%) 0%,
-    var(--tile) 42%,
-    color-mix(in srgb, var(--tile) 85%, black 22%) 100%);
-  border: 1px solid color-mix(in srgb, white 25%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.35), 0 10px 30px rgba(0,0,0,0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-/* Sized to SteamGridDB's own Grid shape (600x900 portrait capsule) instead
-   of a square — a square box pillarboxed every portrait grid with ~50px of
-   empty padding on each side. No padding, so the art sits flush against the
-   box edge like the banner instead of behind a thick matte. height: 100% is
-   just the pre-layout fallback — renderer.js overwrites it (inline style)
-   to match the banner box's real rendered height, since the two boxes'
-   fixed aspect ratios naturally compute different heights at a shared row
-   height. align-self: center matches the banner box below: with the row
-   still taller than either box, "auto" (this box's default) would anchor
-   it to the row's top while the banner stayed centered, so their matching
-   heights would sit at different vertical offsets instead of lining up. */
-.detail-grid-box {
-  flex: 0 0 auto;
-  height: 100%;
-  aspect-ratio: 2 / 3;
-  align-self: center;
-}
-
-/* contain, not cover — a picked Grid image is meant to be seen in full,
-   unlike the banner (backdrop art, fine to crop). Cover was cropping
-   non-square art (SteamGridDB grids, some OS-extracted icons) instead of
-   showing the whole picture. */
-.detail-grid-box img { width: 100%; height: 100%; object-fit: contain; }
-.detail-grid-box .letter { font-size: 56px; font-weight: 700; color: var(--tile-fg); }
-
-/* Sized to SteamGridDB's own Hero shape (1920x620, ~3.1:1) — the box was
-   previously 920:430 (~2.14:1), a leftover from when this slot sourced from
-   the Grid endpoint's landscape option instead of the dedicated Hero
-   endpoint, which left ~50px of empty letterboxing above and below every
-   downloaded banner. */
-.detail-banner-box {
-  flex: 1;
-  min-width: 0;
-  align-self: center;
-  aspect-ratio: 1920 / 620;
-}
-
-/* contain, not cover — a locally-picked file can be any aspect ratio at
-   all, and even Hero art varies slightly game to game; cover would crop it
-   instead of showing the whole picture. */
-.detail-banner-box img { width: 100%; height: 100%; object-fit: contain; }
-
-.detail-meta-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 16px;
-  flex: 0 0 auto;
-}
-
-.detail-title {
-  font-size: clamp(18px, 2.6vw, 36px);
-  font-weight: 700;
-  color: var(--fg);
-}
-
-.detail-playtime {
-  font-size: 13px;
-  color: var(--dim-fg);
-  white-space: nowrap;
-}
-
-
-.detail-actions {
-  display: flex;
   gap: 14px;
-  margin-top: auto;
-  padding-top: 10px;
-}
-
-.detail-btn {
-  padding: 12px 34px;
-  border-radius: 24px;
-  font-size: 15px;
-  font-weight: 700;
-  cursor: pointer;
-  text-align: center;
-  border: 2px solid transparent;
-  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.15s ease;
-}
-
-.detail-btn.primary {
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--accent) 80%, white 25%) 0%,
-    var(--accent) 55%,
-    color-mix(in srgb, var(--accent) 85%, black 20%) 100%);
-  color: var(--accent-fg);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.4);
-}
-
-.detail-btn.secondary {
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--tile) 78%, white 16%) 0%,
-    var(--tile) 45%,
-    color-mix(in srgb, var(--tile) 85%, black 20%) 100%);
-  color: var(--tile-fg);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.3);
-}
-
-.detail-btn.active { border-color: var(--accent); }
-
-.detail-btn:hover, .detail-btn.kbd-focus {
-  transform: translateY(-2px);
-  box-shadow: 0 0 0 2px var(--accent), 0 0 20px 4px var(--glow);
-}
-
-/* Update Game / Font / Time: shared row-based form controls */
-
-.update-form {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-width: 560px;
-  padding: 10px;
-}
-
-.update-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 14px 18px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--tile) 55%, transparent);
-  border: 2px solid transparent;
-  cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-
-.update-row:hover, .update-row.kbd-focus {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--tile) 75%, transparent);
-}
-
-.update-row-label { font-size: 13px; color: var(--dim-fg); flex: 0 0 auto; }
-.update-row-value {
-  font-size: 14px;
-  color: var(--fg);
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* A connected segmented control (24-hour/12-hour, Off/On, Small/Medium/
-   Large, −Smaller/+Bigger) — previously these reused .detail-btn.secondary,
-   the same wide standalone pill the Play button uses, which read as a row
-   of disconnected, oddly-spaced buttons rather than one grouped choice. */
-.size-options {
-  display: inline-flex;
-  margin: 6px 0 0 10px;
+  padding: 12px 14px;
   border-radius: 12px;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, white 22%, transparent);
-  background: color-mix(in srgb, var(--tile) 55%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.15), 0 4px 10px rgba(0,0,0,0.25);
-}
-
-.option-btn {
-  padding: 11px 22px;
-  text-align: center;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fg);
-  white-space: nowrap;
   cursor: pointer;
-  border-right: 1px solid color-mix(in srgb, white 14%, transparent);
-  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  transition: background 0.18s ease, box-shadow 0.2s var(--ease);
 }
 
-.option-btn:last-child { border-right: none; }
+.color-row.kbd-focus { background: color-mix(in srgb, var(--tile-fg) 8%, transparent); box-shadow: var(--focus-ring); }
 
-.option-btn:hover:not(.active) {
-  background: color-mix(in srgb, var(--tile) 90%, transparent);
+.color-row-label { width: 50px; font-size: 13px; font-weight: 700; }
+.color-row-value { width: 34px; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; }
+
+/* Short windows: tighten the dialogs so they fit without scrolling. */
+@media (max-height: 560px) {
+  .modal { padding: 18px 22px; }
+  .modal-buttons { margin-top: 14px; }
+  .color-preview { width: 52px; height: 52px; margin: 0 auto 10px; border-radius: 14px; }
+  .color-row { padding: 7px 12px; }
+  .art-grid { margin-top: 10px; gap: 10px; }
 }
 
-.option-btn.active {
-  background: linear-gradient(to bottom,
-    color-mix(in srgb, var(--accent) 80%, white 25%) 0%,
-    var(--accent) 55%,
-    color-mix(in srgb, var(--accent) 85%, black 20%) 100%);
-  color: var(--accent-fg);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.4);
+.slider-fill.channel-0 { background: #ff5a5a; }
+.slider-fill.channel-1 { background: #3ddc84; }
+.slider-fill.channel-2 { background: #4a9bff; }
+
+/* ---------- scrollbars ---------- */
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4px; }
+
+/* ---------- reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
-
-.option-btn.kbd-focus {
-  outline: none;
-  position: relative;
-  z-index: 1;
-  box-shadow: inset 0 0 0 2px var(--accent), 0 0 14px 2px var(--glow);
-}
-
-.timezone-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-width: 400px;
-  max-height: 260px;
-  overflow-y: auto;
-  padding: 10px;
-  margin-top: 10px;
-}
-
-.timezone-row {
-  display: flex;
-  align-items: baseline;
-  gap: 14px;
-  padding: 10px 16px;
-  border-radius: 8px;
-  font-size: 14px;
-  cursor: pointer;
-  border: 2px solid transparent;
-  color: var(--fg);
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-
-.timezone-row:hover, .timezone-row.kbd-focus { border-color: var(--accent); }
-
-.timezone-row.active {
-  background: color-mix(in srgb, var(--accent) 35%, var(--tile));
-  font-weight: 600;
-}
-
-.timezone-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.timezone-row-clock {
-  flex: 0 0 auto;
-  font-variant-numeric: tabular-nums;
-  color: var(--fg);
-}
-
-.timezone-row-diff {
-  flex: 0 0 auto;
-  min-width: 74px;
-  text-align: right;
-  font-size: 12px;
-  color: var(--dim-fg);
-}
-
-.timezone-row.active .timezone-row-diff { color: var(--accent-fg); }
-
-.screen-subtitle {
-  font-size: 13px;
-  color: var(--dim-fg);
-  margin: -8px 0 16px 10px;
-}
-
-.modal textarea {
-  width: 100%;
-  padding: 9px 10px;
-  border-radius: 7px;
-  border: 1px solid rgba(255,255,255,0.2);
-  background: rgba(0,0,0,0.35);
-  color: #fff;
-  font-size: 14px;
-  font-family: inherit;
-  outline: none;
-  resize: vertical;
-}
-
-.modal textarea:focus { border-color: var(--accent); }

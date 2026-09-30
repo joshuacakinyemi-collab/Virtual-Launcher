@@ -1,5 +1,5 @@
 const state = {
-  apps: [], themeColor: '#0e6cc4', themeMode: 'dark', theme: null, assetsDir: '',
+  apps: [], themeColor: '#0e6cc4', themeMode: 'dark', theme: null,
   user: { name: 'Player', iconPath: null },
   fontPath: null, fontFamily: null, fontSize: 'medium', customFonts: [],
   timezone: null, timeFormat: '24h', timezones: [], showSeconds: false,
@@ -7,7 +7,7 @@ const state = {
   uiSounds: { move: null, confirm: null, back: null },
   customUiSounds: { move: [], confirm: [], back: [] },
 };
-const ui = { screen: 'menu', updateGameSlug: null, selectedSlug: null };
+const ui = { screen: 'menu', updateGameSlug: null };
 
 // A curated accent palette (Menu Color) — picking one of these recolors
 // the whole theme in one step; glow/tile always derive from it
@@ -35,7 +35,7 @@ const PRESET_ACCENTS = [
 // steps in memory for the session so only the first lookup per game (or
 // per game+kind) pays the network cost.
 const sgdbSearchCache = new Map(); // name.trim().toLowerCase() -> {id, name}
-const sgdbArtCache = new Map(); // `${gameId}:${kind}` -> grids array
+const sgdbArtCache = new Map(); // `${gameId}:${kind}` -> gallery (see pickSteamGridDbArt)
 
 let clockInterval = null;
 let screenInterval = null;
@@ -43,8 +43,47 @@ let currentKeyHandler = null;
 let modalOpen = false;
 let fontStyleEl = null;
 
-function joinPath(...parts) {
-  return parts.join('/').replace(/\/+/g, '/');
+/* ---------- small DOM helpers ---------- */
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+
+function goTo(screen) {
+  ui.screen = screen;
+  render();
+}
+
+// Line icons (24x24, stroke = currentColor) instead of emoji — emoji render
+// differently on every OS and can't pick up the theme's foreground color.
+const ICON_PATHS = {
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  trash: '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>',
+  edit: '<path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/>',
+  droplet: '<path d="M12 2.7l5.66 5.66a8 8 0 1 1-11.31 0z"/>',
+  user: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  type: '<path d="M4 7V4h16v3M9 20h6M12 4v16"/>',
+  clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+  music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+  volume: '<path d="M11 5L6 9H2v6h4l5 4z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>',
+  back: '<path d="M19 12H5M12 19l-7-7 7-7"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  power: '<path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/>',
+  sun: '<circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>',
+  moon: '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+  sliders: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  check: '<path d="M20 6L9 17l-5-5"/>',
+  play: '<path d="M7 4l13 8-13 8z" fill="currentColor"/>',
+};
+
+function iconNode(name, className = 'icon') {
+  const span = el('span', className);
+  span.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name] || ''}</svg>`;
+  return span;
 }
 
 // Every icon/banner/font path from main.js is a native OS path — on
@@ -65,6 +104,12 @@ function fileUrl(p) {
 function baseName(p) {
   return p ? p.split(/[\\/]/).pop() : null;
 }
+
+function capitalize(s) {
+  return s[0].toUpperCase() + s.slice(1);
+}
+
+/* ---------- background music ---------- */
 
 // One looping <audio> element for the whole app session — created once
 // (setupBackgroundMusic, called from init) rather than per-render, since
@@ -107,8 +152,8 @@ function pauseBackgroundMusic() {
   if (bgMusicEl) bgMusicEl.pause();
 }
 
-// ---------- UI navigation sound effects ----------
-//
+/* ---------- UI navigation sound effects ---------- */
+
 // Synthesized with the Web Audio API (short oscillator blips) rather than
 // shipped audio files — these are built-in app chrome, not user content
 // like the background track, so there's nothing to import or store.
@@ -118,8 +163,7 @@ function pauseBackgroundMusic() {
 // and gamepad input is itself dispatched as a real KeyboardEvent that
 // reaches the exact same handleKey code (see dispatchSyntheticKey) — so
 // hooking sound into those three functions covers every screen and every
-// modal in the app in one place, for both input methods, rather than
-// needing a call added at each of their many use sites.
+// modal in the app in one place, for both input methods.
 let uiAudioCtx = null;
 const uiSoundLastPlayed = { move: 0, confirm: 0, back: 0 };
 // A physical key held down auto-repeats far faster than these blips are
@@ -187,14 +231,14 @@ function resetCustomUiSound(kind) {
 // reads the same way: each tick in a held scroll sits a bit higher than
 // the last.
 function playCustomUiSound(kind, streak) {
-  let el = customUiAudioEls[kind];
-  if (!el) {
-    el = new Audio(fileUrl(state.uiSounds[kind]));
-    customUiAudioEls[kind] = el;
+  let audio = customUiAudioEls[kind];
+  if (!audio) {
+    audio = new Audio(fileUrl(state.uiSounds[kind]));
+    customUiAudioEls[kind] = audio;
   }
-  el.currentTime = 0;
-  el.playbackRate = kind === 'move' ? 1 + streak * 0.06 : 1;
-  el.play().catch(() => {});
+  audio.currentTime = 0;
+  audio.playbackRate = kind === 'move' ? 1 + streak * 0.06 : 1;
+  audio.play().catch(() => {});
 }
 
 function playUiSound(kind) {
@@ -222,6 +266,8 @@ function previewUiSound(kind) {
   uiSoundLastPlayed[kind] = 0;
   playUiSound(kind);
 }
+
+/* ---------- formatting ---------- */
 
 function formatClock(tz) {
   const opts = { hour: '2-digit', minute: '2-digit', hour12: state.timeFormat === '12h' };
@@ -274,6 +320,8 @@ function findAppBySlug(slug) {
   return state.apps.find((a) => a.slug === slug) || null;
 }
 
+/* ---------- theme / font ---------- */
+
 function applyTheme() {
   const t = state.theme;
   const root = document.documentElement.style;
@@ -283,11 +331,10 @@ function applyTheme() {
   root.setProperty('--tile-overlay', t.tileOverlay);
   root.setProperty('--accent', state.themeColor);
   root.setProperty('--fg', Theme.readableFg(t.bg));
-  root.setProperty('--dim-fg', Theme.mix(Theme.readableFg(t.bg), t.bg, 0.55));
+  root.setProperty('--dim-fg', Theme.mix(Theme.readableFg(t.bg), t.bg, 0.45));
   root.setProperty('--tile-fg', Theme.readableFg(t.tile));
-  root.setProperty('--bubble-fg', Theme.readableFg(t.tileOverlay));
-  root.setProperty('--bubble-fg-muted', Theme.mix(Theme.readableFg(t.tileOverlay), t.tileOverlay, 0.35));
   root.setProperty('--accent-fg', Theme.readableFg(state.themeColor));
+  document.documentElement.setAttribute('data-mode', state.themeMode);
 }
 
 function applyCustomFont(fontPath, family) {
@@ -299,7 +346,7 @@ function applyCustomFont(fontPath, family) {
     fontStyleEl = document.createElement('style');
     fontStyleEl.textContent = `@font-face { font-family: '${family}'; src: url('${fileUrl(fontPath)}'); }`;
     document.head.appendChild(fontStyleEl);
-    document.documentElement.style.setProperty('--user-font', `'${family}', 'Segoe UI', sans-serif`);
+    document.documentElement.style.setProperty('--user-font', `'${family}'`);
   } else {
     document.documentElement.style.removeProperty('--user-font');
   }
@@ -327,6 +374,37 @@ async function persistDisplaySettings() {
     timeFormat: state.timeFormat,
     showSeconds: state.showSeconds,
   });
+}
+
+/* ---------- full-screen backdrop ---------- */
+
+// The focused game's banner fills the screen behind the menu, the way a
+// console dashboard swaps its background art as you move along the game
+// row. Each change fades a fresh <img> in over the old one (which fades out
+// and is then removed) rather than swapping one element's src, which would
+// hard-cut instead of crossfading.
+let backdropShown = null;
+let backdropWanted = null;
+
+function showBackdrop(imagePath) {
+  backdropWanted = imagePath || null;
+  applyBackdrop();
+}
+
+function applyBackdrop() {
+  if (backdropWanted === backdropShown) return;
+  backdropShown = backdropWanted;
+  const root = document.getElementById('backdrop');
+  for (const old of root.children) {
+    old.classList.remove('shown');
+    setTimeout(() => old.remove(), 700);
+  }
+  if (!backdropShown) return;
+  const img = el('img', 'backdrop-img');
+  img.alt = '';
+  img.onload = () => requestAnimationFrame(() => img.classList.add('shown'));
+  img.src = fileUrl(backdropShown);
+  root.appendChild(img);
 }
 
 /* ---------- keyboard nav ---------- */
@@ -415,26 +493,83 @@ function pollGamepads() {
   requestAnimationFrame(pollGamepads);
 }
 
+function gamepadConnected() {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  return Array.from(pads).some((p) => p && p.connected);
+}
+
+/* ---------- focus memory + pointer focus (shared by every nav) ---------- */
+
+// Every action on a settings screen re-renders it from scratch (render()
+// rebuilds the DOM), which used to drop focus back onto the first row —
+// pressing Louder three times meant navigating back down to it three
+// times. Each screen's nav now saves its position here and restores it on
+// the next render of the same screen, which also means backing out of a
+// sub-screen lands on the entry you came from, the way a console menu does.
+// Modal navs (created while modalOpen is true) never read or write this —
+// they'd otherwise clobber the position of the screen underneath them.
+const navMemory = {};
+
+function navMemoryKey() {
+  return modalOpen ? null : ui.screen;
+}
+
+// The mouse moves the same highlight the keyboard/gamepad does, so there's
+// only ever one focused item on screen (previously :hover styled a second,
+// unrelated one). Chromium fires mousemove on a *stationary* pointer when
+// content scrolls under it, which would let a resting cursor steal focus
+// mid keyboard-scroll — so only moves that actually changed the pointer's
+// screen position count.
+let pointerReallyMoved = false;
+let lastPointerX = null;
+let lastPointerY = null;
+window.addEventListener('mousemove', (e) => {
+  pointerReallyMoved = e.screenX !== lastPointerX || e.screenY !== lastPointerY;
+  lastPointerX = e.screenX;
+  lastPointerY = e.screenY;
+}, true);
+
+// Rebinding an element (e.g. the art picker rebuilding its nav after "Load
+// more") replaces its handler rather than stacking a second, stale one.
+function bindPointerFocus(node, onPoint) {
+  if (!node._onPointerFocus) node.addEventListener('mousemove', () => { if (pointerReallyMoved) node._onPointerFocus(); });
+  node._onPointerFocus = onPoint;
+}
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function revealFocused(node) {
+  // 'nearest' only scrolls if it's actually off-screen, so this is a no-op
+  // (no jitter) when everything already fits.
+  node.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+  // Keeps real DOM focus in sync with the visual highlight — a no-op for
+  // plain divs (tiles, rows), but matters for actual <button> elements
+  // (modal dialogs), which otherwise kept a native focus of their own.
+  node.focus?.();
+}
+
 // 1D nav: horizontal by default (tile strips), or vertical (Up/Down) for
-// lists — vertical mode leaves Left/Right unhandled so a caller can use an
-// unconsumed ArrowLeft to mean "leave this list" (e.g. back to the category
-// rail) without the two meanings colliding.
-function createNav(items, { onEscape, vertical = false, onFocus, initialIndex = 0 } = {}) {
-  let index = items.length ? Math.max(0, Math.min(items.length - 1, initialIndex)) : 0;
+// lists.
+function createNav(items, { onEscape, vertical = false, onFocus, initialIndex } = {}) {
+  const memoryKey = navMemoryKey();
+  const start = initialIndex ?? (memoryKey ? navMemory[memoryKey] : 0) ?? 0;
+  let index = clamp(start, 0, Math.max(0, items.length - 1));
   function apply() {
     items.forEach((it, i) => it.el.classList.toggle('kbd-focus', i === index));
-    // Follows the focused item into view when a list overflows its
-    // container — 'nearest' only scrolls if it's actually off-screen, so
-    // this is a no-op (no jitter) when everything already fits.
-    items[index]?.el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
-    // Keeps real DOM focus in sync with the visual highlight — a no-op for
-    // plain divs (tiles, rows), but matters for actual <button> elements
-    // (modal dialogs): without this, moving the highlight left the native
-    // focus ring behind on whichever button got an explicit .focus() call
-    // at mount, so two different buttons looked focused at once.
-    items[index]?.el.focus?.();
-    if (onFocus && items[index]) onFocus(items[index], index);
+    const cur = items[index];
+    if (!cur) return;
+    revealFocused(cur.el);
+    if (memoryKey) navMemory[memoryKey] = index;
+    if (onFocus) onFocus(cur, index);
   }
+  function focusIndex(i) {
+    if (i === index) return;
+    index = i;
+    apply();
+  }
+  items.forEach((it, i) => bindPointerFocus(it.el, () => focusIndex(i)));
   if (items.length) apply();
   function move(delta) {
     if (!items.length) return;
@@ -456,20 +591,21 @@ function createNav(items, { onEscape, vertical = false, onFocus, initialIndex = 
   return { handleKey, move, activate, getIndex: () => index };
 }
 
-// 2D grid nav for the Settings grid. ArrowLeft at column 0 is deliberately
-// left unhandled (no preventDefault) for the same "leave this zone" reason
-// as createNav's vertical mode.
-function create2DNav(items, cols, { onEscape } = {}) {
-  let index = 0;
+// 2D grid nav for the Settings / Menu Color grids.
+function create2DNav(items, cols, { onEscape, initialIndex } = {}) {
+  const memoryKey = navMemoryKey();
+  let index = clamp(initialIndex ?? ((memoryKey && navMemory[memoryKey]) || 0), 0, Math.max(0, items.length - 1));
   function apply() {
     items.forEach((it, i) => it.el.classList.toggle('kbd-focus', i === index));
-    items[index]?.el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
-    items[index]?.el.focus?.();
+    if (!items[index]) return;
+    revealFocused(items[index].el);
+    if (memoryKey) navMemory[memoryKey] = index;
   }
+  items.forEach((it, i) => bindPointerFocus(it.el, () => { if (i !== index) { index = i; apply(); } }));
   if (items.length) apply();
   function moveTo(newIndex) {
     if (!items.length) return;
-    const clamped = Math.max(0, Math.min(items.length - 1, newIndex));
+    const clamped = clamp(newIndex, 0, items.length - 1);
     if (clamped !== index) playUiSound('move');
     index = clamped;
     apply();
@@ -496,42 +632,54 @@ function create2DNav(items, cols, { onEscape } = {}) {
 // horizontal button groups (24-hour/12-hour, Off/On, Small/Medium/Large) —
 // unlike create2DNav's uniform grid, each row here can hold a different
 // number of items. Up/Down moves between rows (clamping the column to
-// whatever the new row has); Left/Right moves within the current row and
-// is a harmless no-op on a single-item row, so a horizontal pair is
-// actually reachable with Left/Right instead of only responding to Up/Down
-// as if it were just another vertical list entry.
+// whatever the new row has); Left/Right moves within the current row.
+// An item with an `adjust(delta)` function (a slider — see
+// buildSliderRow) takes Left/Right for itself instead, so a volume bar
+// moves directly the way a console settings slider does.
 function createRowNav(rows, { onEscape } = {}) {
-  let row = 0;
-  let col = 0;
-  function currentRow() {
-    return rows[row] || [];
+  rows = rows.filter((r) => r.length);
+  const memoryKey = navMemoryKey();
+  const saved = (memoryKey && navMemory[memoryKey]) || { row: 0, col: 0 };
+  let row = clamp(saved.row, 0, Math.max(0, rows.length - 1));
+  let col = clamp(saved.col, 0, Math.max(0, (rows[row] || []).length - 1));
+  function currentItem() {
+    return (rows[row] || [])[col];
   }
   function apply() {
     rows.forEach((r, ri) => r.forEach((it, ci) => it.el.classList.toggle('kbd-focus', ri === row && ci === col)));
-    const cur = currentRow()[col];
-    cur?.el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
-    cur?.el.focus?.();
+    const cur = currentItem();
+    if (!cur) return;
+    revealFocused(cur.el);
+    if (memoryKey) navMemory[memoryKey] = { row, col };
   }
-  if (rows.length && rows[0].length) apply();
+  rows.forEach((r, ri) => r.forEach((it, ci) => bindPointerFocus(it.el, () => {
+    if (ri === row && ci === col) return;
+    row = ri;
+    col = ci;
+    apply();
+  })));
+  if (rows.length) apply();
   function moveRow(delta) {
     if (!rows.length) return;
-    const newRow = Math.max(0, Math.min(rows.length - 1, row + delta));
+    const newRow = clamp(row + delta, 0, rows.length - 1);
     if (newRow !== row) playUiSound('move');
     row = newRow;
-    col = Math.min(col, Math.max(0, currentRow().length - 1));
+    col = Math.min(col, rows[row].length - 1);
     apply();
   }
   function moveCol(delta) {
-    const r = currentRow();
+    const cur = currentItem();
+    if (cur?.adjust) { playUiSound('move'); cur.adjust(delta); return; }
+    const r = rows[row] || [];
     if (r.length < 2) return;
-    const newCol = Math.max(0, Math.min(r.length - 1, col + delta));
+    const newCol = clamp(col + delta, 0, r.length - 1);
     if (newCol !== col) playUiSound('move');
     col = newCol;
     apply();
   }
   function activate() {
-    const item = currentRow()[col];
-    if (item) { playUiSound('confirm'); item.activate(); }
+    const item = currentItem();
+    if (item?.activate) { playUiSound('confirm'); item.activate(); }
   }
   function handleKey(e) {
     switch (e.key) {
@@ -564,154 +712,137 @@ function countGridColumns(items) {
   return cols || 1;
 }
 
+/* ---------- footer button hints ---------- */
+
+// With a controller plugged in, Enter/Esc hints show as the pad's own A/B
+// face buttons instead of keyboard key names — the same action, labelled
+// in terms of whatever is actually in the player's hands.
+const PAD_GLYPHS = { Enter: 'A', Esc: 'B' };
+let currentHints = [];
+
+function setHints(items) {
+  currentHints = items;
+  drawHints();
+}
+
+function drawHints() {
+  const footer = document.getElementById('footer-hints');
+  const usePad = gamepadConnected();
+  footer.innerHTML = '';
+  currentHints.forEach(({ key, label }) => {
+    const hint = el('span', 'hint');
+    const glyph = usePad && PAD_GLYPHS[key];
+    const k = el('span', glyph ? `hint-key pad pad-${glyph.toLowerCase()}` : 'hint-key', glyph || key);
+    hint.append(k, el('span', null, label));
+    footer.appendChild(hint);
+  });
+}
+
+window.addEventListener('gamepadconnected', drawHints);
+window.addEventListener('gamepaddisconnected', drawHints);
+
+const HINTS = {
+  list: [{ key: '↑↓', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }],
+  form: [{ key: '↑↓', label: 'Navigate' }, { key: '←→', label: 'Adjust' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }],
+  strip: [{ key: '←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }],
+  grid: [{ key: '↑↓←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }],
+  choose: [{ key: '←→', label: 'Choose' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Cancel' }],
+};
+
 /* ---------- modals ---------- */
 
 // `hints` replaces the footer bar's content for as long as this modal is
-// open (restored on close) — the underlying screen's hints (e.g. "Enter
-// Select") describe its own list, not the dialog now covering it.
+// open (restored on close) — the underlying screen's hints describe its
+// own list, not the dialog now covering it.
 function openModal(build, { wide = false, hints } = {}) {
   return new Promise((resolve) => {
     modalOpen = true;
     const root = document.getElementById('modal-root');
     root.innerHTML = '';
-    const backdrop = document.createElement('div');
-    backdrop.className = 'modal-backdrop';
-    const modal = document.createElement('div');
-    modal.className = wide ? 'modal wide' : 'modal';
+    const backdrop = el('div', 'modal-backdrop');
+    const modal = el('div', wide ? 'modal wide' : 'modal');
     backdrop.appendChild(modal);
 
-    const footer = document.getElementById('footer-hints');
-    const previousHintsHTML = footer.innerHTML;
+    const previousHints = currentHints;
     if (hints) setHints(hints);
 
     function close(value) {
       modalOpen = false;
       root.innerHTML = '';
-      footer.innerHTML = previousHintsHTML;
+      setHints(previousHints);
       resolve(value);
     }
 
     backdrop.addEventListener('keydown', (e) => e.stopPropagation());
     build(modal, close);
     root.appendChild(backdrop);
+    // Navs inside build() highlight their first item before the modal is
+    // attached, when focus() can't take — focus it now that it can, so key
+    // events (real, and the gamepad's synthetic ones, which dispatch from
+    // document.activeElement) land inside the dialog instead of on <body>.
+    modal.querySelector('.kbd-focus')?.focus();
   });
+}
+
+function modalButton(label, primary, onClick) {
+  const btn = el('button', primary ? 'btn primary' : 'btn secondary', label);
+  btn.onclick = onClick;
+  return btn;
+}
+
+// Shared shape of every button-row dialog (confirm, error, choice): a
+// title, a message, and a Left/Right-navigable row of buttons with a
+// visible focus ring on each — Escape always means the `escapeValue`.
+function openButtonDialog(title, message, options, { escapeValue = null, initialIndex = 0, preWrap = false } = {}) {
+  const hints = options.length > 1 ? HINTS.choose : [{ key: 'Enter', label: 'OK' }];
+  return openModal((modal, close) => {
+    const p = el('p', null, message);
+    if (preWrap) p.style.whiteSpace = 'pre-wrap';
+    const buttons = el('div', 'modal-buttons');
+    const items = options.map((opt) => {
+      const btn = modalButton(opt.label, opt.primary, () => close(opt.value));
+      buttons.appendChild(btn);
+      return { el: btn, activate: () => close(opt.value) };
+    });
+    modal.append(el('h3', null, title), p, buttons);
+    const nav = createNav(items, { onEscape: () => close(escapeValue), initialIndex });
+    modal.parentElement.addEventListener('keydown', (e) => nav.handleKey(e));
+  }, { hints });
+}
+
+function showConfirm(title, message, confirmLabel = 'Confirm') {
+  return openButtonDialog(title, message, [
+    { label: 'Cancel', value: false },
+    { label: confirmLabel, value: true, primary: true },
+  ], { escapeValue: false, initialIndex: 1 });
+}
+
+function showError(title, message) {
+  return openButtonDialog(title, message, [{ label: 'OK', value: undefined, primary: true }], { escapeValue: undefined, preWrap: true });
+}
+
+// options: [{label, value, primary}]
+function showChoice(title, message, options) {
+  return openButtonDialog(title, message, options);
 }
 
 function showPrompt(title, label, initialValue) {
   return openModal((modal, close) => {
-    const h = document.createElement('h3');
-    h.textContent = title;
-    const lbl = document.createElement('label');
-    lbl.textContent = label;
-    const input = document.createElement('input');
+    const input = el('input');
     input.type = 'text';
     input.value = initialValue || '';
-    const buttons = document.createElement('div');
-    buttons.className = 'modal-buttons';
-    const cancelBtn = document.createElement('button');
-    cancelBtn.textContent = 'Cancel';
-    cancelBtn.className = 'secondary';
-    const okBtn = document.createElement('button');
-    okBtn.textContent = 'OK';
-    okBtn.className = 'primary';
-    buttons.append(cancelBtn, okBtn);
-    modal.append(h, lbl, input, buttons);
+    const submit = () => close(input.value.trim() || null);
+    const buttons = el('div', 'modal-buttons');
+    buttons.append(modalButton('Cancel', false, () => close(null)), modalButton('OK', true, submit));
+    modal.append(el('h3', null, title), el('label', null, label), input, buttons);
 
-    cancelBtn.onclick = () => close(null);
-    okBtn.onclick = () => close(input.value.trim() || null);
     input.addEventListener('keydown', (e) => {
       e.stopPropagation();
       if (e.key === 'Escape') close(null);
-      if (e.key === 'Enter') close(input.value.trim() || null);
+      if (e.key === 'Enter') submit();
     });
     setTimeout(() => { input.focus(); input.select(); }, 0);
   }, { hints: [{ key: 'Enter', label: 'OK' }, { key: 'Esc', label: 'Cancel' }] });
-}
-
-// Enter/Escape still work as shortcuts (Escape = Cancel, matching every
-// other screen's Back convention), but Cancel/Confirm are also a real
-// Left/Right-navigable list with a visible focus ring on both buttons —
-// without that, only Confirm ever showed as focused and Cancel was a
-// mouse-only dead end, even though Escape happened to reach it.
-function showConfirm(title, message, confirmLabel = 'Confirm') {
-  return openModal((modal, close) => {
-    const h = document.createElement('h3');
-    h.textContent = title;
-    const p = document.createElement('p');
-    p.textContent = message;
-    const buttons = document.createElement('div');
-    buttons.className = 'modal-buttons';
-    const noBtn = document.createElement('button');
-    noBtn.textContent = 'Cancel';
-    noBtn.className = 'secondary';
-    const yesBtn = document.createElement('button');
-    yesBtn.textContent = confirmLabel;
-    yesBtn.className = 'primary';
-    buttons.append(noBtn, yesBtn);
-    modal.append(h, p, buttons);
-
-    noBtn.onclick = () => close(false);
-    yesBtn.onclick = () => close(true);
-
-    const items = [
-      { el: noBtn, activate: () => close(false) },
-      { el: yesBtn, activate: () => close(true) },
-    ];
-    const nav = createNav(items, { onEscape: () => close(false), initialIndex: 1 });
-    modal.parentElement.addEventListener('keydown', (e) => nav.handleKey(e));
-    setTimeout(() => yesBtn.focus(), 0);
-  }, { hints: [{ key: '←→', label: 'Choose' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Cancel' }] });
-}
-
-function showError(title, message) {
-  return openModal((modal, close) => {
-    const h = document.createElement('h3');
-    h.textContent = title;
-    const p = document.createElement('p');
-    p.style.whiteSpace = 'pre-wrap';
-    p.textContent = message;
-    const buttons = document.createElement('div');
-    buttons.className = 'modal-buttons';
-    const okBtn = document.createElement('button');
-    okBtn.textContent = 'OK';
-    okBtn.className = 'primary';
-    buttons.append(okBtn);
-    modal.append(h, p, buttons);
-
-    okBtn.onclick = () => close();
-    const nav = createNav([{ el: okBtn, activate: () => close() }], { onEscape: () => close() });
-    modal.parentElement.addEventListener('keydown', (e) => nav.handleKey(e));
-    setTimeout(() => okBtn.focus(), 0);
-  }, { hints: [{ key: 'Enter', label: 'OK' }] });
-}
-
-// Generic small choice modal — options: [{label, value, primary}]. Buttons
-// are a horizontal list, so it uses the same createNav (Left/Right + Enter)
-// every other on-screen list uses — a gamepad/keyboard user can pick any
-// option here, not just click one with a mouse.
-function showChoice(title, message, options) {
-  return openModal((modal, close) => {
-    const h = document.createElement('h3');
-    h.textContent = title;
-    const p = document.createElement('p');
-    p.textContent = message;
-    const buttons = document.createElement('div');
-    buttons.className = 'modal-buttons';
-    const btnItems = [];
-    options.forEach((opt) => {
-      const btn = document.createElement('button');
-      btn.textContent = opt.label;
-      btn.className = opt.primary ? 'primary' : 'secondary';
-      btn.onclick = () => close(opt.value);
-      buttons.appendChild(btn);
-      btnItems.push({ el: btn, activate: () => close(opt.value) });
-    });
-    modal.append(h, p, buttons);
-
-    const nav = createNav(btnItems, { onEscape: () => close(null) });
-    modal.parentElement.addEventListener('keydown', (e) => nav.handleKey(e));
-    setTimeout(() => btnItems[0]?.el.focus(), 0);
-  }, { hints: [{ key: '←→', label: 'Choose' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Cancel' }] });
 }
 
 // Non-interactive modal for a brief async wait (SteamGridDB search/fetch) —
@@ -721,14 +852,9 @@ function showLoadingModal(text) {
   modalOpen = true;
   const root = document.getElementById('modal-root');
   root.innerHTML = '';
-  const backdrop = document.createElement('div');
-  backdrop.className = 'modal-backdrop';
-  const modal = document.createElement('div');
-  modal.className = 'modal';
-  const p = document.createElement('p');
-  p.style.margin = '0';
-  p.textContent = text;
-  modal.appendChild(p);
+  const backdrop = el('div', 'modal-backdrop');
+  const modal = el('div', 'modal loading');
+  modal.append(el('span', 'spinner'), el('p', null, text));
   backdrop.appendChild(modal);
   root.appendChild(backdrop);
   return () => {
@@ -737,42 +863,121 @@ function showLoadingModal(text) {
   };
 }
 
-function showArtPicker(gameName, grids, kind = 'banner') {
-  return openModal((modal, close) => {
-    const h = document.createElement('h3');
-    h.textContent = `Art for "${gameName}"`;
-    const p = document.createElement('p');
-    p.textContent = 'Pick one, or skip.';
-    const grid = document.createElement('div');
-    grid.className = 'art-grid';
-    const thumbItems = [];
-    grids.forEach((g) => {
-      const img = document.createElement('img');
-      // Icons are square, Grids are portrait (Steam's tall capsule art),
-      // Banners are wide (SteamGridDB's Hero asset) — each gets a thumb
-      // shaped like what it actually is, instead of squashing/stretching
-      // it into a box built for a different aspect ratio.
-      img.className = 'art-thumb' + (kind === 'icon' ? ' art-thumb-icon' : kind === 'banner' ? ' art-thumb-banner' : '');
-      img.src = g.thumb;
-      img.addEventListener('click', () => close(g.url));
-      grid.appendChild(img);
-      thumbItems.push({ el: img, activate: () => close(g.url) });
-    });
-    const buttons = document.createElement('div');
-    buttons.className = 'modal-buttons';
-    const skipBtn = document.createElement('button');
-    skipBtn.textContent = 'Skip';
-    skipBtn.className = 'secondary';
-    skipBtn.onclick = () => close(null);
-    buttons.appendChild(skipBtn);
-    modal.append(h, p, grid, buttons);
+// Animated SteamGridDB art has a short video clip as its thumbnail, which
+// an <img> can't display — it rendered as a blank tile.
+function isVideoThumb(url) {
+  return /\.(webm|mp4)(\?|$)/i.test(url || '');
+}
 
-    // Matches .art-grid's actual visual layout: 3 columns normally, but
-    // banner thumbs are full-width rows (see .art-thumb-banner), so that
-    // kind navigates as a single column instead.
-    const items = thumbItems.concat([{ el: skipBtn, activate: () => close(null) }]);
-    const nav = create2DNav(items, kind === 'banner' ? 1 : 3, { onEscape: () => close(null) });
-    modal.parentElement.addEventListener('keydown', (e) => nav.handleKey(e));
+function artThumbMedia(g) {
+  if (isVideoThumb(g.thumb)) {
+    const video = el('video');
+    Object.assign(video, { src: g.thumb, muted: true, loop: true, autoplay: true, playsInline: true });
+    return video;
+  }
+  const img = el('img');
+  img.loading = 'lazy';
+  img.alt = '';
+  img.src = g.thumb;
+  return img;
+}
+
+// gallery: { grids, hasMore, loadMore() } from pickSteamGridDbArt. Every
+// option is shown whole (contain, not cover) in a cell shaped for its kind —
+// square icons, tall grids, wide banners — with its real size underneath,
+// since SteamGridDB "grids" come in several shapes and cropping them all to
+// one box hid what you were actually picking. "Load more" fetches the next
+// page and appends it in place.
+function showArtPicker(gameName, gallery, kind = 'banner') {
+  return openModal((modal, close) => {
+    modal.classList.add('art-picker');
+    const summary = el('p');
+    const grid = el('div', `art-grid art-grid-${kind}`);
+    const skipBtn = modalButton('Skip', false, () => close(null));
+    const buttons = el('div', 'modal-buttons');
+    buttons.appendChild(skipBtn);
+    modal.append(el('h3', null, `${ART_KIND_LABEL[kind]} for "${gameName}"`), summary, grid, buttons);
+
+    const options = [];
+    const seenIds = new Set();
+    let moreTile = null;
+    let nav = null;
+    let loading = false;
+
+    function addOptions(grids) {
+      let added = 0;
+      for (const g of grids) {
+        if (seenIds.has(g.id)) continue;
+        seenIds.add(g.id);
+        added++;
+        const tile = el('div', 'art-option');
+        tile.tabIndex = -1; // focusable, so key events keep reaching the dialog
+        const media = el('div', 'art-option-media');
+        media.appendChild(artThumbMedia(g));
+        const meta = el('div', 'art-option-meta');
+        meta.appendChild(el('span', null, g.width && g.height ? `${g.width}×${g.height}` : ''));
+        if (isVideoThumb(g.thumb) || g.mime === 'image/gif') media.appendChild(el('span', 'art-option-badge', 'Animated'));
+        tile.append(media, meta);
+        tile.addEventListener('click', () => close(g.url));
+        grid.insertBefore(tile, moreTile);
+        options.push({ el: tile, activate: () => close(g.url) });
+      }
+      return added;
+    }
+
+    function refreshSummary() {
+      const n = options.length;
+      summary.textContent = `${n} option${n === 1 ? '' : 's'}${gallery.hasMore ? ', more available' : ''} — pick one, or skip.`;
+    }
+
+    function syncMoreTile() {
+      if (gallery.hasMore && !moreTile) {
+        moreTile = el('div', 'art-option art-more');
+        moreTile.tabIndex = -1;
+        moreTile.append(iconNode('plus', 'art-more-icon'), el('div', 'art-more-label', 'Load more'));
+        moreTile.addEventListener('click', loadMore);
+        grid.appendChild(moreTile);
+      } else if (!gallery.hasMore && moreTile) {
+        moreTile.remove();
+        moreTile = null;
+      }
+    }
+
+    // Columns are measured from the real layout (auto-fill wraps to the
+    // dialog's width), so this runs only once the dialog is on screen.
+    function buildNav(startIndex) {
+      const items = options.slice();
+      if (moreTile) items.push({ el: moreTile, activate: loadMore });
+      items.push({ el: skipBtn, activate: () => close(null) });
+      nav = create2DNav(items, countGridColumns(items), { onEscape: () => close(null), initialIndex: startIndex });
+    }
+
+    async function loadMore() {
+      if (loading || !moreTile) return;
+      loading = true;
+      moreTile.classList.add('loading');
+      moreTile.lastChild.textContent = 'Loading…';
+      const firstNew = options.length;
+      const res = await gallery.loadMore();
+      loading = false;
+      const added = res.ok ? addOptions(res.grids) : 0;
+      // A page with nothing new (or a failed request) ends the list rather
+      // than leaving a "Load more" that never loads anything.
+      gallery.hasMore = res.ok && res.hasMore && added > 0;
+      if (moreTile) {
+        moreTile.classList.remove('loading');
+        moreTile.lastChild.textContent = 'Load more';
+      }
+      syncMoreTile();
+      refreshSummary();
+      buildNav(added ? firstNew : options.length);
+    }
+
+    addOptions(gallery.grids);
+    syncMoreTile();
+    refreshSummary();
+    modal.parentElement.addEventListener('keydown', (e) => { if (nav) nav.handleKey(e); });
+    requestAnimationFrame(() => buildNav(0));
   }, { wide: true, hints: [{ key: '↑↓←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Skip' }] });
 }
 
@@ -788,6 +993,21 @@ async function manageSteamGridDbKey() {
 }
 
 const ART_KIND_LABEL = { icon: 'Icon', grid: 'Grid', banner: 'Banner' };
+const ART_FETCHERS = {
+  icon: (id, page) => window.api.steamGridDbIcons(id, page),
+  grid: (id, page) => window.api.steamGridDbGrids(id, page),
+  banner: (id, page) => window.api.steamGridDbHeroes(id, page),
+};
+
+// Runs one async step behind a loading modal, always closing it after.
+async function withLoading(text, fn) {
+  const hide = showLoadingModal(text);
+  try {
+    return await fn();
+  } finally {
+    hide();
+  }
+}
 
 // Looks up art for a game on SteamGridDB. kind is 'icon', 'grid', or
 // 'banner' — three distinct SteamGridDB asset types (Icons, Grids, Heroes),
@@ -802,34 +1022,36 @@ async function pickSteamGridDbArt(name, appPath, kind = 'banner') {
   const searchKey = name.trim().toLowerCase();
   let match = sgdbSearchCache.get(searchKey);
   if (!match) {
-    let hideLoading = showLoadingModal(`Searching SteamGridDB for "${name}"…`);
-    const searchRes = await window.api.steamGridDbSearch(name);
-    hideLoading();
+    const searchRes = await withLoading(`Searching SteamGridDB for "${name}"…`, () => window.api.steamGridDbSearch(name));
     if (!searchRes.ok || !searchRes.results.length) return null;
     match = searchRes.results[0];
     sgdbSearchCache.set(searchKey, match);
   }
 
+  // A gallery accumulates every page loaded so far, so reopening the picker
+  // for the same game+kind shows everything already fetched, "Load more"
+  // included, without refetching.
   const artCacheKey = `${match.id}:${kind}`;
-  let grids = sgdbArtCache.get(artCacheKey);
-  if (!grids) {
-    const hideLoading = showLoadingModal(`Fetching ${ART_KIND_LABEL[kind].toLowerCase()} options…`);
-    const fetchFn = kind === 'icon' ? window.api.steamGridDbIcons
-      : kind === 'grid' ? window.api.steamGridDbGrids
-      : window.api.steamGridDbHeroes;
-    const gridsRes = await fetchFn(match.id);
-    hideLoading();
-    if (!gridsRes.ok || !gridsRes.grids.length) return null;
-    grids = gridsRes.grids;
-    sgdbArtCache.set(artCacheKey, grids);
+  let gallery = sgdbArtCache.get(artCacheKey);
+  if (!gallery) {
+    const firstPage = await withLoading(`Fetching ${ART_KIND_LABEL[kind].toLowerCase()} options…`, () => ART_FETCHERS[kind](match.id, 0));
+    if (!firstPage.ok || !firstPage.grids.length) return null;
+    gallery = { grids: firstPage.grids, page: 0, hasMore: !!firstPage.hasMore };
+    gallery.loadMore = async () => {
+      const res = await ART_FETCHERS[kind](match.id, gallery.page + 1);
+      if (res.ok) {
+        gallery.page += 1;
+        gallery.grids = gallery.grids.concat(res.grids);
+      }
+      return res;
+    };
+    sgdbArtCache.set(artCacheKey, gallery);
   }
 
-  const chosenUrl = await showArtPicker(match.name, grids, kind);
+  const chosenUrl = await showArtPicker(match.name, gallery, kind);
   if (!chosenUrl) return null;
 
-  hideLoading = showLoadingModal('Downloading…');
-  const dl = await window.api.steamGridDbDownload({ url: chosenUrl, appPath, kind });
-  hideLoading();
+  const dl = await withLoading('Downloading…', () => window.api.steamGridDbDownload({ url: chosenUrl, appPath, kind }));
   return dl.ok ? dl.path : null;
 }
 
@@ -855,183 +1077,141 @@ async function pickImageFor(kind, gameName, appPath) {
   return result || undefined;
 }
 
-/* ---------- shared tile helpers (Remove Game, Update Game picker, Settings grid) ---------- */
+/* ---------- tiles (home row, Settings grid, Remove/Update pickers, Menu Color) ---------- */
 
-function tileIconNode(entry) {
+const KIND_ICONS = {
+  add: 'plus', remove: 'trash', updateGame: 'edit', color: 'droplet', updateUser: 'user',
+  font: 'type', time: 'clock', music: 'music', uiSounds: 'volume', steamgriddb: 'image',
+  back: 'back', settings: 'gear', quit: 'power', custom: 'sliders',
+};
+
+function letterNode(name) {
+  return el('span', 'letter', (name[0] || '?').toUpperCase());
+}
+
+function tileArt(entry) {
   if (entry.kind === 'game') {
-    if (entry.iconPath) {
-      const img = document.createElement('img');
-      img.className = 'icon-img';
-      img.src = fileUrl(entry.iconPath);
-      img.alt = entry.name;
-      return img;
-    }
-    const span = document.createElement('span');
-    span.className = 'letter';
-    span.textContent = (entry.name[0] || '?').toUpperCase();
-    return span;
-  }
-  if (entry.kind === 'add') {
-    const img = document.createElement('img');
-    img.className = 'icon-img';
-    img.src = fileUrl(joinPath(state.assetsDir, 'ps4_plus.png'));
-    img.alt = 'Add';
+    if (!entry.iconPath) return letterNode(entry.name);
+    const img = el('img', 'icon-img');
+    img.src = fileUrl(entry.iconPath);
+    img.alt = entry.name;
     return img;
   }
-  const emojiMap = {
-    remove: '🗑', color: '🎨', steamgriddb: '🖼', back: '←', settings: '⚙', quit: '⏻',
-    updateGame: '📝', updateUser: '👤', font: '🔤', time: '🕒', music: '🎵', uiSounds: '🔊',
-  };
-  const span = document.createElement('span');
-  span.className = 'letter';
-  span.textContent = emojiMap[entry.kind] || '?';
-  return span;
+  return iconNode(KIND_ICONS[entry.kind] || 'image', 'tile-icon');
 }
 
-function menuActionWord(entry) {
-  if (entry.kind === 'back') return 'Back';
-  return 'Open';
-}
-
-function removeActionWord(entry) {
-  return entry.kind === 'back' ? 'Back' : 'Remove';
-}
-
-function updateActionWord(entry) {
-  return entry.kind === 'back' ? 'Back' : 'Edit';
-}
-
-function buildTile(entry, actionWord) {
-  const wrap = document.createElement('div');
-  wrap.className = 'tile-wrap';
-
-  const anchor = document.createElement('div');
-  anchor.className = 'tile-anchor';
-
-  const surface = document.createElement('div');
-  surface.className = 'tile-surface';
-  surface.appendChild(tileIconNode(entry));
-  anchor.appendChild(surface);
-
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  const nameEl = document.createElement('div');
-  nameEl.className = 'bubble-name';
-  nameEl.textContent = entry.name;
-  const actionEl = document.createElement('div');
-  actionEl.className = 'bubble-action';
-  actionEl.textContent = actionWord;
-  bubble.append(nameEl, actionEl);
-  anchor.appendChild(bubble);
-
-  wrap.appendChild(anchor);
-  return wrap;
-}
-
-function buildTileStrip(entries, onActivate, actionWordFn) {
-  const outer = document.createElement('div');
-  outer.className = 'tile-strip-outer';
-  const strip = document.createElement('div');
-  strip.className = 'tile-strip';
-  const items = [];
-  entries.forEach((entry) => {
-    const wrap = buildTile(entry, actionWordFn(entry));
-    wrap.addEventListener('click', () => onActivate(entry));
-    strip.appendChild(wrap);
-    items.push({ el: wrap, activate: () => onActivate(entry) });
-  });
-  outer.appendChild(strip);
-  return { stripEl: outer, items };
-}
-
-function buildSettingsGrid(entries, onActivate) {
-  const outer = document.createElement('div');
-  outer.className = 'settings-grid-outer';
-  const grid = document.createElement('div');
-  grid.className = 'settings-grid';
-  const items = [];
-  entries.forEach((entry) => {
-    const wrap = buildTile(entry, menuActionWord(entry));
-    wrap.addEventListener('click', () => onActivate(entry));
-    grid.appendChild(wrap);
-    items.push({ el: wrap, activate: () => onActivate(entry) });
-  });
-  outer.appendChild(grid);
-  return { gridEl: outer, items };
-}
-
-function buildGameList(entries, onSelect) {
-  const outer = document.createElement('div');
-  outer.className = 'game-list-outer';
-  const list = document.createElement('div');
-  list.className = 'game-list';
-  const items = [];
-  if (!entries.length) {
-    const empty = document.createElement('div');
-    empty.className = 'game-list-empty';
-    empty.textContent = 'No games yet — add one from Settings.';
-    list.appendChild(empty);
+// A card: square art on top, name (and, when given, a small action word
+// shown only while focused) underneath. `active` pins a check badge in the
+// corner — used by Menu Color for the current swatch/mode.
+function buildTile(entry, { action, art = tileArt(entry), caption = true, active = false, extraClass = '' } = {}) {
+  const tile = el('div', `tile ${extraClass}`.trim());
+  tile.title = entry.name;
+  const artBox = el('div', 'tile-art');
+  artBox.appendChild(art);
+  if (active) artBox.appendChild(iconNode('check', 'tile-badge'));
+  tile.appendChild(artBox);
+  if (caption) {
+    tile.appendChild(el('div', 'tile-label', entry.name));
+    if (action) tile.appendChild(el('div', 'tile-action', action));
   }
-  entries.forEach((entry) => {
-    const row = document.createElement('div');
-    row.className = entry.kind === 'settings' ? 'game-row game-row-settings' : 'game-row';
-    const thumb = document.createElement('div');
-    thumb.className = 'game-row-thumb';
-    thumb.appendChild(tileIconNode(entry));
-    const name = document.createElement('div');
-    name.className = 'game-row-name';
-    name.textContent = entry.name;
-    row.append(thumb, name);
-    row.addEventListener('click', () => onSelect(entry));
-    list.appendChild(row);
-    items.push({ el: row, activate: () => onSelect(entry) });
-  });
-  outer.appendChild(list);
-  return { listEl: outer, items };
+  return tile;
 }
 
-function setHints(items) {
-  const footer = document.getElementById('footer-hints');
-  footer.innerHTML = '';
-  items.forEach(({ key, label }) => {
-    const hint = document.createElement('span');
-    hint.className = 'hint';
-    const k = document.createElement('span');
-    k.className = 'hint-key';
-    k.textContent = key;
-    const l = document.createElement('span');
-    l.textContent = label;
-    hint.append(k, l);
-    footer.appendChild(hint);
+// layout: 'strip' (one horizontally-scrolling row) or 'grid' (wrapping).
+function buildTileCollection(entries, onActivate, { layout = 'grid', tileOptions = () => ({}) } = {}) {
+  const outer = el('div', layout === 'strip' ? 'tile-strip-outer' : 'tile-grid-outer');
+  const inner = el('div', layout === 'strip' ? 'tile-strip' : 'tile-grid');
+  const items = entries.map((entry) => {
+    const tile = buildTile(entry, tileOptions(entry));
+    tile.addEventListener('click', () => onActivate(entry));
+    inner.appendChild(tile);
+    return { el: tile, activate: () => onActivate(entry) };
   });
+  outer.appendChild(inner);
+  return { el: outer, items };
 }
 
-function buildScreenTitle(text) {
-  const el = document.createElement('div');
-  el.className = 'screen-title';
-  el.textContent = text;
-  return el;
+/* ---------- shared screen building blocks ---------- */
+
+// Every sub-screen is the same frame: the persistent header, then a title
+// (+ optional subtitle), then a scrolling content column. Returns the
+// content column for the caller to fill.
+function buildScreen(appEl, title, subtitle) {
+  const screen = el('div', 'screen');
+  const head = el('div', 'screen-head');
+  head.appendChild(el('div', 'screen-title', title));
+  if (subtitle) head.appendChild(el('div', 'screen-subtitle', subtitle));
+  const content = el('div', 'screen-content');
+  screen.append(head, content);
+  appEl.append(buildHeader(), screen);
+  return content;
+}
+
+function buildSectionLabel(text) {
+  return el('div', 'section-label', text);
+}
+
+function buildEmptyNote(text) {
+  return el('div', 'empty-note', text);
+}
+
+function buildBackButton(onBack) {
+  const btn = el('div', 'btn secondary back-btn');
+  btn.append(iconNode('back'), el('span', null, 'Back'));
+  btn.addEventListener('click', onBack);
+  return { el: btn, activate: onBack };
+}
+
+// A single focusable row: a label on the left, optionally the current
+// value on the right. Returned as {el, activate} — the item shape every nav
+// constructor takes.
+function buildRow(label, { value, onActivate, iconName } = {}) {
+  const row = el('div', 'row');
+  if (iconName) row.appendChild(iconNode(iconName, 'row-icon'));
+  row.appendChild(el('div', 'row-label', label));
+  if (value !== undefined) row.appendChild(el('div', 'row-value', value));
+  if (onActivate) row.addEventListener('click', onActivate);
+  return { el: row, activate: onActivate };
+}
+
+// A connected segmented control (24-hour/12-hour, Off/On, Small/Medium/
+// Large). options: [{label, active, onActivate}] -> {el, items}.
+function buildOptionGroup(options) {
+  const group = el('div', 'option-group');
+  const items = options.map(({ label, active, onActivate }) => {
+    const btn = el('div', active ? 'option-btn active' : 'option-btn', label);
+    btn.addEventListener('click', onActivate);
+    group.appendChild(btn);
+    return { el: btn, activate: onActivate };
+  });
+  return { el: group, items };
+}
+
+// A console-style slider row: Left/Right (or the −/+ ends, for the mouse)
+// nudge it directly — see createRowNav's `adjust` handling. `fraction` is
+// the fill, 0..1.
+function buildSliderRow(label, { fraction, valueText, onAdjust }) {
+  const row = el('div', 'row slider-row');
+  const track = el('div', 'slider');
+  const fill = el('div', 'slider-fill');
+  fill.style.width = `${clamp(fraction, 0, 1) * 100}%`;
+  track.appendChild(fill);
+  const minus = el('div', 'slider-step', '−');
+  const plus = el('div', 'slider-step', '+');
+  minus.addEventListener('click', () => onAdjust(-1));
+  plus.addEventListener('click', () => onAdjust(1));
+  row.append(el('div', 'row-label', label), minus, track, plus, el('div', 'row-value', valueText));
+  return { el: row, adjust: onAdjust };
 }
 
 // Shared by every "pick from a list of imported files" screen (Change
 // Font, Background Music's track list, Menu Sounds) — each row shows a
-// label, an Active/Select status, and an optional Remove button. Returns
-// {el, activate} directly in the shape createRowNav's rows arrays want.
+// label, an Active/Select status, and an optional Remove button.
 function buildSelectableRow({ label, isActive, onActivate, onRemove }) {
-  const row = document.createElement('div');
-  row.className = 'timezone-row' + (isActive ? ' active' : '');
-  const name = document.createElement('div');
-  name.className = 'timezone-row-name';
-  name.textContent = label;
-  const status = document.createElement('div');
-  status.className = 'timezone-row-diff';
-  status.textContent = isActive ? 'Active' : 'Select';
-  row.append(name, status);
+  const row = el('div', 'list-row' + (isActive ? ' active' : ''));
+  row.append(el('div', 'list-row-name', label), el('div', 'list-row-meta', isActive ? 'Active' : 'Select'));
   if (onRemove) {
-    const removeBtn = document.createElement('div');
-    removeBtn.className = 'timezone-row-diff';
-    removeBtn.textContent = 'Remove';
-    removeBtn.style.cursor = 'pointer';
+    const removeBtn = el('div', 'list-row-remove', 'Remove');
     removeBtn.addEventListener('click', (e) => { e.stopPropagation(); onRemove(); });
     row.append(removeBtn);
   }
@@ -1039,94 +1219,97 @@ function buildSelectableRow({ label, isActive, onActivate, onRemove }) {
   return { el: row, activate: onActivate };
 }
 
+function buildList(rows, { emptyText, scroll = false } = {}) {
+  const list = el('div', scroll ? 'list scroll' : 'list');
+  rows.forEach((r) => list.appendChild(r.el));
+  if (!rows.length && emptyText) list.appendChild(buildEmptyNote(emptyText));
+  return list;
+}
+
+/* ---------- header ---------- */
+
+async function confirmQuit() {
+  if (await showConfirm('Quit', 'Quit the launcher?', 'Quit')) window.api.quit();
+}
+
 // Persistent header used by every screen: player icon+name (click to open
-// Update Player), clock, a settings-gear shortcut, and power. Sub-screens
-// show their own heading in the body via buildScreenTitle instead of the
-// header changing.
+// Update Player), clock, a settings-gear shortcut, and power.
 //
 // The Settings/Power icons are a mouse convenience layered on top of, not
-// instead of, the sidebar's own Settings/Quit entries (see renderMenu) —
-// those stay the authoritative controller/keyboard-reachable path (every
-// screen's nav already reaches Settings, and Quit from the home screen),
-// so adding mouse-clickable header icons here doesn't reintroduce the
-// mouse-only dead end the header deliberately avoided before.
+// instead of, the home row's own Settings/Quit tiles (see renderMenu) —
+// those stay the authoritative controller/keyboard-reachable path, so
+// these mouse-clickable header icons don't reintroduce a mouse-only dead end.
 function buildHeader() {
-  const header = document.createElement('div');
-  header.className = 'header';
+  const header = el('div', 'header');
 
-  const left = document.createElement('div');
-  left.className = 'header-left';
-  const playerIcon = document.createElement('div');
-  playerIcon.className = 'header-player-icon';
+  const player = el('div', 'header-player');
+  const avatar = el('div', 'avatar');
   if (state.user.iconPath) {
-    const img = document.createElement('img');
+    const img = el('img');
     img.src = fileUrl(state.user.iconPath);
     img.alt = state.user.name;
-    playerIcon.appendChild(img);
+    avatar.appendChild(img);
   } else {
-    playerIcon.textContent = (state.user.name[0] || 'P').toUpperCase();
+    avatar.textContent = (state.user.name[0] || 'P').toUpperCase();
   }
-  const playerBox = document.createElement('div');
-  playerBox.className = 'header-player-box';
-  const playerName = document.createElement('div');
-  playerName.className = 'header-player-name';
-  playerName.textContent = state.user.name;
-  playerBox.appendChild(playerName);
-  const goUpdateUser = () => { ui.screen = 'updateUser'; render(); };
-  playerIcon.addEventListener('click', goUpdateUser);
-  playerBox.addEventListener('click', goUpdateUser);
-  left.append(playerIcon, playerBox);
+  player.append(avatar, el('div', 'header-player-name', state.user.name));
+  player.addEventListener('click', () => goTo('updateUser'));
 
-  const right = document.createElement('div');
-  right.className = 'header-right';
-
-  const clock = document.createElement('div');
-  clock.className = 'clock';
-  clock.textContent = formatClock();
+  const right = el('div', 'header-right');
+  const clock = el('div', 'clock', formatClock());
   clockInterval = setInterval(() => { clock.textContent = formatClock(); }, 1000);
 
-  const settingsBtn = document.createElement('div');
-  settingsBtn.className = 'header-icon-btn';
+  const settingsBtn = el('div', 'header-icon-btn');
   settingsBtn.title = 'Settings';
-  settingsBtn.textContent = '⚙';
-  settingsBtn.addEventListener('click', () => { ui.screen = 'settings'; render(); });
+  settingsBtn.appendChild(iconNode('gear'));
+  settingsBtn.addEventListener('click', () => goTo('settings'));
 
-  const powerBtn = document.createElement('div');
-  powerBtn.className = 'header-icon-btn header-power-btn';
+  const powerBtn = el('div', 'header-icon-btn power');
   powerBtn.title = 'Quit';
-  powerBtn.textContent = '⏻';
-  powerBtn.addEventListener('click', async () => {
-    if (await showConfirm('Quit', 'Quit the launcher?', 'Quit')) window.api.quit();
-  });
+  powerBtn.appendChild(iconNode('power'));
+  powerBtn.addEventListener('click', confirmQuit);
 
   right.append(clock, settingsBtn, powerBtn);
-  header.append(left, right);
+  header.append(player, right);
   return header;
 }
 
 /* ---------- central render ---------- */
+
+const SCREENS = {
+  menu: renderMenu,
+  settings: renderSettings,
+  remove: renderRemove,
+  color: renderColor,
+  updateGamePick: renderUpdateGamePick,
+  updateGameEdit: renderUpdateGameEdit,
+  updateUser: renderUpdateUser,
+  font: renderFont,
+  time: renderTime,
+  music: renderMusic,
+  uiSounds: renderUiSounds,
+};
+
+let lastRenderedScreen = null;
 
 function render() {
   clearInterval(clockInterval);
   clearInterval(screenInterval);
   screenInterval = null;
   currentKeyHandler = null;
+  backdropWanted = null;
   const appEl = document.getElementById('app');
+  // The entrance animation only plays when actually arriving on a screen —
+  // a same-screen re-render (after changing a setting, or a resize) swaps
+  // content in place instead of visibly re-entering.
+  appEl.classList.toggle('screen-enter', ui.screen !== lastRenderedScreen);
+  lastRenderedScreen = ui.screen;
   appEl.innerHTML = '';
-  if (ui.screen === 'menu') renderMenu(appEl);
-  else if (ui.screen === 'settings') renderSettings(appEl);
-  else if (ui.screen === 'remove') renderRemove(appEl);
-  else if (ui.screen === 'color') renderColor(appEl);
-  else if (ui.screen === 'updateGamePick') renderUpdateGamePick(appEl);
-  else if (ui.screen === 'updateGameEdit') renderUpdateGameEdit(appEl);
-  else if (ui.screen === 'updateUser') renderUpdateUser(appEl);
-  else if (ui.screen === 'font') renderFont(appEl);
-  else if (ui.screen === 'time') renderTime(appEl);
-  else if (ui.screen === 'music') renderMusic(appEl);
-  else if (ui.screen === 'uiSounds') renderUiSounds(appEl);
+  (SCREENS[ui.screen] || renderMenu)(appEl);
+  applyBackdrop();
 }
 
-/* ---------- home: games sidebar ---------- */
+/* ---------- home: game row + hero ---------- */
 
 function settingsEntries() {
   return [
@@ -1144,18 +1327,15 @@ function settingsEntries() {
   ];
 }
 
+const SETTINGS_SCREEN_FOR = {
+  remove: 'remove', updateGame: 'updateGamePick', color: 'color', updateUser: 'updateUser',
+  font: 'font', time: 'time', music: 'music', uiSounds: 'uiSounds', back: 'menu',
+};
+
 async function activateSettingsEntry(entry) {
   if (entry.kind === 'add') await addGameFlow();
-  else if (entry.kind === 'remove') { ui.screen = 'remove'; render(); }
-  else if (entry.kind === 'updateGame') { ui.screen = 'updateGamePick'; render(); }
-  else if (entry.kind === 'color') { ui.screen = 'color'; render(); }
-  else if (entry.kind === 'updateUser') { ui.screen = 'updateUser'; render(); }
-  else if (entry.kind === 'font') { ui.screen = 'font'; render(); }
-  else if (entry.kind === 'time') { ui.screen = 'time'; render(); }
-  else if (entry.kind === 'music') { ui.screen = 'music'; render(); }
-  else if (entry.kind === 'uiSounds') { ui.screen = 'uiSounds'; render(); }
   else if (entry.kind === 'steamgriddb') await manageSteamGridDbKey();
-  else if (entry.kind === 'back') { ui.screen = 'menu'; render(); }
+  else if (SETTINGS_SCREEN_FOR[entry.kind]) goTo(SETTINGS_SCREEN_FOR[entry.kind]);
 }
 
 async function launchGame(entry) {
@@ -1182,8 +1362,7 @@ async function launchGame(entry) {
 async function addGameFlow() {
   const chosen = await window.api.chooseAppPath();
   if (!chosen) return;
-  const base = chosen.replace(/\/+$/, '').split('/').pop();
-  const defaultName = base.replace(/\.[^.]+$/, '');
+  const defaultName = baseName(chosen.replace(/[\\/]+$/, '')).replace(/\.[^.]+$/, '');
   const name = await showPrompt('New app', 'Name:', defaultName);
   if (!name) return;
   const iconPath = await pickImageFor('icon', name, chosen);
@@ -1193,918 +1372,530 @@ async function addGameFlow() {
   render();
 }
 
-/* ---------- update user: pick what to change, then edit just that ---------- */
-
-// Unlike the old flow (which always asked for a new name AND a new icon,
-// every time), this screen lists Name/Icon as separate rows — the same
-// "row shows current value, click/Enter edits just that field" pattern as
-// Update Game — so choosing to change one never forces a decision on the
-// other, and it's always visible what the current value is before you
-// change it.
-function renderUpdateUser(appEl) {
-  const header = buildHeader();
-  const body = document.createElement('div');
-  body.className = 'subscreen-body';
-  body.appendChild(buildScreenTitle('Update Player'));
-  const subtitle = document.createElement('div');
-  subtitle.className = 'screen-subtitle';
-  subtitle.textContent = 'Choose what to change — everything else stays the same.';
-  body.appendChild(subtitle);
-
-  const form = document.createElement('div');
-  form.className = 'update-form';
-
-  const nameRow = document.createElement('div');
-  nameRow.className = 'update-row';
-  const nameLabel = document.createElement('div');
-  nameLabel.className = 'update-row-label';
-  nameLabel.textContent = 'Name';
-  const nameVal = document.createElement('div');
-  nameVal.className = 'update-row-value';
-  nameVal.textContent = state.user.name;
-  nameRow.append(nameLabel, nameVal);
-  const doChangeName = async () => {
-    const name = await showPrompt('Change Name', 'Player name:', state.user.name);
-    if (!name) return;
-    state.user = await window.api.updateUser({ name });
-    render();
-  };
-  nameRow.addEventListener('click', doChangeName);
-
-  const iconRow = document.createElement('div');
-  iconRow.className = 'update-row';
-  const iconLabel = document.createElement('div');
-  iconLabel.className = 'update-row-label';
-  iconLabel.textContent = 'Icon';
-  const iconVal = document.createElement('div');
-  iconVal.className = 'update-row-value';
-  iconVal.textContent = state.user.iconPath ? 'Set' : '(none)';
-  iconRow.append(iconLabel, iconVal);
-  const doChangeIcon = async () => {
-    const picked = await window.api.chooseImagePath();
-    if (!picked) return;
-    state.user = await window.api.updateUser({ iconPath: picked });
-    render();
-  };
-  iconRow.addEventListener('click', doChangeIcon);
-
-  form.append(nameRow, iconRow);
-
-  const goBack = () => { ui.screen = 'settings'; render(); };
-  const backBtn = document.createElement('div');
-  backBtn.className = 'detail-btn secondary';
-  backBtn.textContent = 'Back';
-  backBtn.addEventListener('click', goBack);
-
-  body.append(form, backBtn);
-  appEl.append(header, body);
-
-  const items = [
-    { el: nameRow, activate: doChangeName },
-    { el: iconRow, activate: doChangeIcon },
-    { el: backBtn, activate: goBack },
-  ];
-  const nav = createNav(items, { vertical: true, onEscape: goBack });
-  currentKeyHandler = (e) => nav.handleKey(e);
-
-  setHints([{ key: '↑↓', label: 'Navigate' }, { key: 'Enter', label: 'Change' }, { key: 'Esc', label: 'Back' }]);
-}
-
-// Home screen: sidebar + a live detail pane, side by side on one screen —
-// hovering or keyboard-focusing a game updates the pane in place, no screen
-// transition. Selecting (click/Enter) a game launches it directly; the
-// pane's own Play/Cancel buttons mirror that for mouse users. Settings and
-// Quit stay in the same list (keyboard/gamepad-reachable), unaffected by
-// which game the pane happens to be showing.
+// Home screen, laid out like a console dashboard: a horizontal row of game
+// tiles along the top (Settings and Quit at its end, so they're reachable
+// with the same Left/Right as everything else), and underneath, a hero for
+// whichever tile is focused — title, playtime, a Play button, its cover
+// art — over that game's banner filling the screen as a backdrop.
+//
+// Two nav zones: the row, and the hero's Play button. Down/Enter on a game
+// moves focus onto Play; Up/Escape returns to the row. Focusing a game only
+// previews it — launching always goes through Play, so the tile itself is
+// never a launch shortcut. Enter on Settings/Quit acts immediately.
 function renderMenu(appEl) {
-  const header = buildHeader();
-
-  const body = document.createElement('div');
-  body.className = 'body';
-
   const entries = state.apps.map((a) => ({ kind: 'game', ...a }))
     .concat([{ kind: 'settings', name: 'Settings' }, { kind: 'quit', name: 'Quit' }]);
 
-  const firstGame = entries.find((e) => e.kind === 'game');
-  if (!entries.some((e) => e.kind === 'game' && e.slug === ui.selectedSlug)) {
-    ui.selectedSlug = firstGame ? firstGame.slug : null;
-  }
+  const home = el('div', 'home');
+  const rowOuter = el('div', 'game-row-outer');
+  const row = el('div', 'game-row');
+  rowOuter.appendChild(row);
+  const hero = el('div', 'hero');
+  home.append(rowOuter, hero);
+  appEl.append(buildHeader(), home);
 
-  const detailPane = buildDetailPane();
-  fillDetailPane(detailPane, entries.find((e) => e.kind === 'game' && e.slug === ui.selectedSlug));
+  let zone = 'row';
+  let playBtn = null;
 
-  // Selecting a game (click, hover, or keyboard/gamepad focus) only
-  // previews it in the detail pane now — launching requires the Play
-  // button specifically, so the icon/row itself is never a launch
-  // shortcut. Settings/Quit are unaffected: selecting those still acts
-  // immediately, same as before.
-  const { listEl, items } = buildGameList(entries, async (entry) => {
-    if (entry.kind === 'settings') {
-      ui.screen = 'settings';
-      render();
-      return;
-    }
-    if (entry.kind === 'quit') {
-      if (await showConfirm('Quit', 'Quit the launcher?', 'Quit')) window.api.quit();
-      return;
-    }
-    if (zone === 'play') focusList();
-    selectEntry(entry);
+  const items = entries.map((entry, i) => {
+    const tile = buildTile(entry, { caption: false, extraClass: entry.kind === 'game' ? 'game-tile' : 'game-tile system' });
+    // Mouse: clicking a game just focuses it (pointer-over already does);
+    // Settings/Quit act straight away.
+    tile.addEventListener('click', () => { if (entry.kind !== 'game') activateEntry(entry); });
+    // createNav ignores pointing at the tile it already has focused, so
+    // coming back from Play onto that same tile needs its own zone reset.
+    tile.addEventListener('mousemove', () => { if (pointerReallyMoved && zone === 'play') focusRow(i); });
+    row.appendChild(tile);
+    return { el: tile, activate: () => activateEntry(entries[i]) };
   });
 
-  // Keeps the previewed game's row highlighted persistently (Steam
-  // library-style), not just while the pointer/keyboard focus is on it.
-  function selectEntry(entry) {
-    if (entry.kind !== 'game') return;
-    ui.selectedSlug = entry.slug;
-    fillDetailPane(detailPane, entry);
-    items.forEach((item, i) => {
-      const e = entries[i];
-      item.el.classList.toggle('selected', e.kind === 'game' && e.slug === entry.slug);
-    });
+  function activateEntry(entry) {
+    if (entry.kind === 'settings') goTo('settings');
+    else if (entry.kind === 'quit') confirmQuit();
   }
 
-  items.forEach((item, i) => {
-    const entry = entries[i];
-    if (entry.kind !== 'game') return;
-    item.el.classList.toggle('selected', entry.slug === ui.selectedSlug);
-    item.el.addEventListener('mouseenter', () => {
-      if (zone === 'play') focusList();
-      selectEntry(entry);
-    });
-  });
+  function fillHero(entry) {
+    hero.innerHTML = '';
+    playBtn = null;
+    const info = el('div', 'hero-info');
+    const title = el('div', 'hero-title', entry.name);
+    const meta = el('div', 'hero-meta');
+    info.append(title, meta);
 
-  body.append(listEl, detailPane);
-  appEl.append(header, body);
+    if (entry.kind !== 'game') {
+      meta.textContent = entry.kind === 'settings'
+        ? (state.apps.length ? 'Games, appearance, sound and your profile.' : 'No games yet — add one from Settings.')
+        : 'Close Virtual Launcher.';
+      hero.appendChild(info);
+      showBackdrop(null);
+      return;
+    }
 
-  // Two nav zones: the sidebar list, and the detail pane's Play button.
-  // ArrowRight/Enter on a game row moves focus onto Play (mirroring "click
-  // Play" for keyboard/gamepad, not "click the icon"); ArrowLeft/Escape
-  // from Play returns to the list. Settings/Quit rows are untouched by
-  // this — Enter still acts on them immediately, same as always.
-  let zone = 'list';
+    meta.textContent = formatPlaytime(entry.playtimeSeconds);
+    const actions = el('div', 'hero-actions');
+    playBtn = el('div', 'btn primary play-btn');
+    playBtn.append(iconNode('play'), el('span', null, 'Play'));
+    playBtn.addEventListener('click', () => launchGame(entry));
+    bindPointerFocus(playBtn, focusPlay);
+    actions.appendChild(playBtn);
+    info.appendChild(actions);
 
-  // Takes an explicit index rather than reading listNav.getIndex() — this
-  // is called from onFocus, which createNav invokes synchronously during
-  // its own construction (before the `const listNav` assignment below has
-  // completed), so listNav isn't safe to reference from in here.
-  function hintsForIndex(i) {
-    const focused = entries[i];
-    const hints = [{ key: '↑↓', label: 'Navigate' }];
-    if (focused?.kind === 'game') hints.push({ key: '→', label: 'Play' });
-    hints.push({ key: 'Enter', label: 'Select' });
-    return hints;
+    const cover = el('div', 'hero-cover');
+    if (entry.gridPath) {
+      const img = el('img');
+      img.src = fileUrl(entry.gridPath);
+      img.alt = entry.name;
+      cover.appendChild(img);
+    } else {
+      cover.classList.add('empty');
+      cover.appendChild(tileArt(entry));
+    }
+    hero.append(info, cover);
+    // Restart the hero's fade-in so switching games reads as a transition,
+    // not an instant text swap.
+    hero.classList.remove('hero-swap');
+    void hero.offsetWidth;
+    hero.classList.add('hero-swap');
+    showBackdrop(entry.bannerPath);
   }
 
-  function playButtonEl() {
-    return detailPane.querySelector('.detail-btn.primary');
+  function hintsFor(entry) {
+    if (entry?.kind === 'game') return [{ key: '←→', label: 'Browse' }, { key: 'Enter', label: 'Select' }];
+    return [{ key: '←→', label: 'Browse' }, { key: 'Enter', label: 'Open' }];
   }
 
   function focusPlay() {
-    const btn = playButtonEl();
-    if (!btn) return;
+    if (!playBtn || zone === 'play') return;
     zone = 'play';
-    btn.classList.add('kbd-focus');
-    setHints([{ key: '←', label: 'Back' }, { key: 'Enter', label: 'Play' }]);
+    home.classList.add('zone-play');
+    playBtn.classList.add('kbd-focus');
+    setHints([{ key: '↑', label: 'Back' }, { key: 'Enter', label: 'Play' }]);
   }
 
-  function focusList() {
-    zone = 'list';
-    const btn = playButtonEl();
-    if (btn) btn.classList.remove('kbd-focus');
-    setHints(hintsForIndex(listNav.getIndex()));
+  function focusRow(index) {
+    zone = 'row';
+    home.classList.remove('zone-play');
+    if (playBtn) playBtn.classList.remove('kbd-focus');
+    setHints(hintsFor(entries[index]));
   }
 
-  const initialIndex = entries.findIndex((e) => e.kind === 'game' && e.slug === ui.selectedSlug);
-  const listNav = createNav(items, {
-    vertical: true,
-    initialIndex: initialIndex >= 0 ? initialIndex : 0,
+  // Takes the index from onFocus rather than reading nav.getIndex() —
+  // createNav invokes onFocus synchronously during its own construction,
+  // before `const nav` below has been assigned.
+  const nav = createNav(items, {
     onFocus: (_item, i) => {
-      selectEntry(entries[i]);
-      if (zone === 'list') setHints(hintsForIndex(i));
+      fillHero(entries[i]);
+      focusRow(i);
     },
   });
 
-  // This screen runs its own list/play zone state machine instead of one
-  // shared nav constructor, so — unlike every other screen — its sounds
-  // need to be called out explicitly here rather than coming for free from
-  // createNav/create2DNav/createRowNav.
+  // This screen runs its own row/play zone state machine on top of
+  // createNav, so the sounds for the zone switches are called out here
+  // rather than coming for free from the nav constructor.
   currentKeyHandler = (e) => {
+    const focused = entries[nav.getIndex()];
     if (zone === 'play') {
-      if (e.key === 'ArrowLeft' || e.key === 'Escape') { playUiSound('back'); focusList(); e.preventDefault(); return; }
-      if (e.key === 'Enter' || e.key === ' ') {
-        const entry = entries.find((en) => en.kind === 'game' && en.slug === ui.selectedSlug);
-        if (entry) { playUiSound('confirm'); launchGame(entry); }
-        e.preventDefault();
-        return;
-      }
+      if (e.key === 'ArrowUp' || e.key === 'Escape') { playUiSound('back'); focusRow(nav.getIndex()); e.preventDefault(); return; }
+      if (e.key === 'Enter' || e.key === ' ') { playUiSound('confirm'); launchGame(focused); e.preventDefault(); }
       return;
     }
-    const focused = entries[listNav.getIndex()];
-    if ((e.key === 'ArrowRight' || e.key === 'Enter' || e.key === ' ') && focused?.kind === 'game') {
+    if ((e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') && focused?.kind === 'game') {
       playUiSound('move');
       focusPlay();
       e.preventDefault();
       return;
     }
-    listNav.handleKey(e);
+    if (e.key === 'ArrowDown') { e.preventDefault(); return; }
+    nav.handleKey(e);
   };
-
-  focusList();
-}
-
-// Builds the detail pane's stable container once per renderMenu call;
-// fillDetailPane() below repopulates its content on every hover/focus
-// change without recreating the pane element itself.
-function buildDetailPane() {
-  const pane = document.createElement('div');
-  pane.className = 'detail-pane';
-  return pane;
-}
-
-let detailResizeObserver = null;
-
-function fillDetailPane(pane, entry) {
-  pane.innerHTML = '';
-  if (detailResizeObserver) {
-    detailResizeObserver.disconnect();
-    detailResizeObserver = null;
-  }
-  if (!entry) return;
-
-  // Grid and banner as their own boxes side by side (grid left, banner
-  // right) — the app's own icon (already shown next to the game in the
-  // sidebar list) doesn't repeat here; this row is SteamGridDB's other two
-  // asset types, Grid and Hero.
-  const topRow = document.createElement('div');
-  topRow.className = 'detail-top-row';
-
-  const gridBox = document.createElement('div');
-  gridBox.className = 'detail-grid-box';
-  if (entry.gridPath) {
-    const img = document.createElement('img');
-    img.src = fileUrl(entry.gridPath);
-    img.alt = entry.name;
-    gridBox.appendChild(img);
-  } else {
-    const span = document.createElement('span');
-    span.className = 'letter';
-    span.textContent = (entry.name[0] || '?').toUpperCase();
-    gridBox.appendChild(span);
-  }
-
-  const bannerBox = document.createElement('div');
-  bannerBox.className = 'detail-banner-box';
-  if (entry.bannerPath) {
-    const bannerImg = document.createElement('img');
-    bannerImg.src = fileUrl(entry.bannerPath);
-    bannerImg.alt = entry.name;
-    bannerBox.appendChild(bannerImg);
-  }
-
-  topRow.append(gridBox, bannerBox);
-
-  // The grid box is a fixed 2:3 portrait and the banner box a fixed ~3.1:1
-  // landscape — at a shared row height those two ratios naturally render at
-  // different heights (banner's width is capped by the remaining row space,
-  // which caps its height too). Lock the grid box to the banner's actual
-  // height instead of the row's, so their tops and bottoms line up. Read
-  // getComputedStyle rather than getBoundingClientRect: the app's text-size
-  // setting uses CSS zoom, which getBoundingClientRect reports post-zoom —
-  // feeding that straight into style.height would zoom it a second time.
-  detailResizeObserver = new ResizeObserver(() => {
-    gridBox.style.height = getComputedStyle(bannerBox).height;
-  });
-  detailResizeObserver.observe(bannerBox);
-
-  const metaRow = document.createElement('div');
-  metaRow.className = 'detail-meta-row';
-  const titleEl = document.createElement('div');
-  titleEl.className = 'detail-title';
-  titleEl.textContent = entry.name;
-  const playtimeEl = document.createElement('div');
-  playtimeEl.className = 'detail-playtime';
-  playtimeEl.textContent = formatPlaytime(entry.playtimeSeconds);
-  metaRow.append(titleEl, playtimeEl);
-
-  const actions = document.createElement('div');
-  actions.className = 'detail-actions';
-  const playBtn = document.createElement('div');
-  playBtn.className = 'detail-btn primary';
-  playBtn.textContent = 'Play';
-  playBtn.addEventListener('click', () => launchGame(entry));
-  actions.append(playBtn);
-
-  pane.append(topRow, metaRow, actions);
 }
 
 /* ---------- settings grid ---------- */
 
 function renderSettings(appEl) {
-  const header = buildHeader();
-  const body = document.createElement('div');
-  body.className = 'subscreen-body';
-  body.appendChild(buildScreenTitle('Settings'));
+  const content = buildScreen(appEl, 'Settings');
+  const goBack = () => goTo('menu');
+  const { el: gridEl, items } = buildTileCollection(settingsEntries(), activateSettingsEntry, {
+    tileOptions: (entry) => ({ action: entry.kind === 'back' ? 'Back' : 'Open' }),
+  });
+  content.appendChild(gridEl);
 
-  const { gridEl, items } = buildSettingsGrid(settingsEntries(), activateSettingsEntry);
-  body.appendChild(gridEl);
-  appEl.append(header, body);
-
-  const goBack = () => { ui.screen = 'menu'; render(); };
   const nav = create2DNav(items, countGridColumns(items), { onEscape: goBack });
   currentKeyHandler = (e) => nav.handleKey(e);
-
-  setHints([{ key: '↑↓←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+  setHints(HINTS.grid);
 }
 
+/* ---------- update user ---------- */
 
-/* ---------- remove game ---------- */
+// Name and Icon as separate rows — each shows its current value, and
+// selecting one edits just that field.
+function renderUpdateUser(appEl) {
+  const content = buildScreen(appEl, 'Update Player', 'Choose what to change — everything else stays the same.');
+  const goBack = () => goTo('settings');
 
-async function activateRemoveEntry(entry) {
-  if (entry.kind === 'back') { ui.screen = 'settings'; render(); return; }
-  const ok = await showConfirm('Remove game', `Remove "${entry.name}" from the launcher?`, 'Remove');
-  if (ok) {
-    state.apps = await window.api.removeApp(entry.slug);
-    render();
-  }
+  const nameRow = buildRow('Name', {
+    value: state.user.name,
+    onActivate: async () => {
+      const name = await showPrompt('Change Name', 'Player name:', state.user.name);
+      if (!name) return;
+      state.user = await window.api.updateUser({ name });
+      render();
+    },
+  });
+  const iconRow = buildRow('Icon', {
+    value: state.user.iconPath ? 'Set' : 'None',
+    onActivate: async () => {
+      const picked = await window.api.chooseImagePath();
+      if (!picked) return;
+      state.user = await window.api.updateUser({ iconPath: picked });
+      render();
+    },
+  });
+  const back = buildBackButton(goBack);
+  content.append(buildList([nameRow, iconRow]), back.el);
+
+  const nav = createNav([nameRow, iconRow, back], { vertical: true, onEscape: goBack });
+  currentKeyHandler = (e) => nav.handleKey(e);
+  setHints(HINTS.list);
+}
+
+/* ---------- remove game / update game picker ---------- */
+
+function renderGamePicker(appEl, title, actionWord, onPick) {
+  const content = buildScreen(appEl, title);
+  const goBack = () => goTo('settings');
+  const entries = state.apps.map((a) => ({ kind: 'game', ...a })).concat([{ kind: 'back', name: 'Back' }]);
+  const { el: stripEl, items } = buildTileCollection(entries, (entry) => {
+    if (entry.kind === 'back') goBack();
+    else onPick(entry);
+  }, {
+    layout: 'strip',
+    tileOptions: (entry) => ({ action: entry.kind === 'back' ? 'Back' : actionWord }),
+  });
+  content.appendChild(stripEl);
+  if (!state.apps.length) content.appendChild(buildEmptyNote('No games added yet.'));
+
+  const nav = createNav(items, { onEscape: goBack });
+  currentKeyHandler = (e) => nav.handleKey(e);
+  setHints(HINTS.strip);
 }
 
 function renderRemove(appEl) {
-  const header = buildHeader();
-  const body = document.createElement('div');
-  body.className = 'subscreen-body';
-  body.appendChild(buildScreenTitle('Remove Game'));
-
-  const entries = state.apps.map((a) => ({ kind: 'game', ...a })).concat([{ kind: 'back', name: 'Back' }]);
-  const { stripEl, items } = buildTileStrip(entries, activateRemoveEntry, removeActionWord);
-  body.appendChild(stripEl);
-
-  appEl.append(header, body);
-
-  const nav = createNav(items, { onEscape: () => { ui.screen = 'settings'; render(); } });
-  currentKeyHandler = (e) => nav.handleKey(e);
-
-  setHints([{ key: '←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+  renderGamePicker(appEl, 'Remove Game', 'Remove', async (entry) => {
+    const ok = await showConfirm('Remove game', `Remove "${entry.name}" from the launcher?`, 'Remove');
+    if (!ok) return;
+    state.apps = await window.api.removeApp(entry.slug);
+    render();
+  });
 }
-
-/* ---------- update game: pick, then edit ---------- */
 
 function renderUpdateGamePick(appEl) {
-  const header = buildHeader();
-  const body = document.createElement('div');
-  body.className = 'subscreen-body';
-  body.appendChild(buildScreenTitle('Update Game'));
-
-  const entries = state.apps.map((a) => ({ kind: 'game', ...a })).concat([{ kind: 'back', name: 'Back' }]);
-  const { stripEl, items } = buildTileStrip(entries, (entry) => {
-    if (entry.kind === 'back') { ui.screen = 'settings'; render(); return; }
+  renderGamePicker(appEl, 'Update Game', 'Edit', (entry) => {
     ui.updateGameSlug = entry.slug;
-    ui.screen = 'updateGameEdit';
-    render();
-  }, updateActionWord);
-  body.appendChild(stripEl);
-
-  appEl.append(header, body);
-
-  const nav = createNav(items, { onEscape: () => { ui.screen = 'settings'; render(); } });
-  currentKeyHandler = (e) => nav.handleKey(e);
-
-  setHints([{ key: '←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+    goTo('updateGameEdit');
+  });
 }
+
+/* ---------- update game: edit ---------- */
+
+const ART_FIELDS = [
+  { kind: 'icon', label: 'Icon', key: 'iconPath' },
+  { kind: 'grid', label: 'Grid', key: 'gridPath' },
+  { kind: 'banner', label: 'Banner', key: 'bannerPath' },
+];
 
 function renderUpdateGameEdit(appEl) {
   const entry = findAppBySlug(ui.updateGameSlug);
-  if (!entry) {
-    ui.screen = 'settings';
-    render();
-    return;
-  }
+  if (!entry) { goTo('settings'); return; }
 
-  const header = buildHeader();
-  const body = document.createElement('div');
-  body.className = 'subscreen-body';
-  body.appendChild(buildScreenTitle(`Update: ${entry.name}`));
+  const content = buildScreen(appEl, entry.name, 'Update this game’s name and artwork.');
+  showBackdrop(entry.bannerPath);
+  const goBack = () => goTo('updateGamePick');
 
-  const form = document.createElement('div');
-  form.className = 'update-form';
-
-  async function editField(key) {
-    if (key === 'name') {
+  const nameRow = buildRow('Name', {
+    value: entry.name,
+    onActivate: async () => {
       const name = await showPrompt('Name', 'Game name:', entry.name);
       if (!name) return;
       state.apps = await window.api.updateApp({ slug: entry.slug, name });
       render();
-    }
-  }
-
-  const fieldRows = [
-    { label: 'Name', value: entry.name, key: 'name' },
-  ].map((r) => {
-    const row = document.createElement('div');
-    row.className = 'update-row';
-    const lbl = document.createElement('div');
-    lbl.className = 'update-row-label';
-    lbl.textContent = r.label;
-    const val = document.createElement('div');
-    val.className = 'update-row-value';
-    val.textContent = r.value;
-    row.append(lbl, val);
-    row.addEventListener('click', () => editField(r.key));
-    form.appendChild(row);
-    return { el: row, activate: () => editField(r.key) };
+    },
   });
-
-  const iconRow = document.createElement('div');
-  iconRow.className = 'update-row';
-  const iconLabel = document.createElement('div');
-  iconLabel.className = 'update-row-label';
-  iconLabel.textContent = 'Icon';
-  const iconVal = document.createElement('div');
-  iconVal.className = 'update-row-value';
-  iconVal.textContent = entry.iconPath ? 'Set' : '(none)';
-  iconRow.append(iconLabel, iconVal);
-  const doChangeIcon = async () => {
-    const result = await pickImageFor('icon', entry.name, entry.path);
-    if (result !== undefined) {
-      state.apps = await window.api.updateApp({ slug: entry.slug, iconPath: result });
+  const artRows = ART_FIELDS.map(({ kind, label, key }) => buildRow(label, {
+    value: entry[key] ? 'Set' : 'None',
+    onActivate: async () => {
+      const result = await pickImageFor(kind, entry.name, entry.path);
+      if (result === undefined) return;
+      state.apps = await window.api.updateApp({ slug: entry.slug, [key]: result });
       render();
-    }
-  };
-  iconRow.addEventListener('click', doChangeIcon);
+    },
+  }));
+  const back = buildBackButton(goBack);
+  content.append(buildList([nameRow, ...artRows]), back.el);
 
-  const bannerRow = document.createElement('div');
-  bannerRow.className = 'update-row';
-  const bannerLabel = document.createElement('div');
-  bannerLabel.className = 'update-row-label';
-  bannerLabel.textContent = 'Banner';
-  const bannerVal = document.createElement('div');
-  bannerVal.className = 'update-row-value';
-  bannerVal.textContent = entry.bannerPath ? 'Set' : '(none)';
-  bannerRow.append(bannerLabel, bannerVal);
-  const doChangeBanner = async () => {
-    const result = await pickImageFor('banner', entry.name, entry.path);
-    if (result !== undefined) {
-      state.apps = await window.api.updateApp({ slug: entry.slug, bannerPath: result });
-      render();
-    }
-  };
-  bannerRow.addEventListener('click', doChangeBanner);
-
-  const gridRow = document.createElement('div');
-  gridRow.className = 'update-row';
-  const gridLabel = document.createElement('div');
-  gridLabel.className = 'update-row-label';
-  gridLabel.textContent = 'Grid';
-  const gridVal = document.createElement('div');
-  gridVal.className = 'update-row-value';
-  gridVal.textContent = entry.gridPath ? 'Set' : '(none)';
-  gridRow.append(gridLabel, gridVal);
-  const doChangeGrid = async () => {
-    const result = await pickImageFor('grid', entry.name, entry.path);
-    if (result !== undefined) {
-      state.apps = await window.api.updateApp({ slug: entry.slug, gridPath: result });
-      render();
-    }
-  };
-  gridRow.addEventListener('click', doChangeGrid);
-
-  form.append(iconRow, gridRow, bannerRow);
-
-  const goBack = () => { ui.screen = 'updateGamePick'; render(); };
-  const backBtn = document.createElement('div');
-  backBtn.className = 'detail-btn secondary';
-  backBtn.textContent = 'Back';
-  backBtn.addEventListener('click', goBack);
-
-  body.append(form, backBtn);
-  appEl.append(header, body);
-
-  const items = [
-    ...fieldRows,
-    { el: iconRow, activate: doChangeIcon },
-    { el: gridRow, activate: doChangeGrid },
-    { el: bannerRow, activate: doChangeBanner },
-    { el: backBtn, activate: goBack },
-  ];
-  const nav = createNav(items, { vertical: true, onEscape: goBack });
+  const nav = createNav([nameRow, ...artRows, back], { vertical: true, onEscape: goBack });
   currentKeyHandler = (e) => nav.handleKey(e);
-
-  setHints([{ key: '↑↓', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+  setHints(HINTS.list);
 }
 
 /* ---------- font settings ---------- */
 
+const FONT_SCALE_MIN = 0.7;
+const FONT_SCALE_MAX = 2;
+
 function renderFont(appEl) {
-  const header = buildHeader();
-  const body = document.createElement('div');
-  body.className = 'subscreen-body';
-  body.appendChild(buildScreenTitle('Change Font'));
+  const content = buildScreen(appEl, 'Change Font');
+  const goBack = () => goTo('settings');
 
-  const form = document.createElement('div');
-  form.className = 'update-form';
-
-  const importRow = document.createElement('div');
-  importRow.className = 'update-row';
-  importRow.textContent = 'Import Font File…';
-  importRow.addEventListener('click', async () => {
-    const picked = await window.api.chooseFontPath();
-    if (!picked) return;
-    applyCustomFont(picked.path, 'CustomUserFont');
-    applyCustomFontScale(1); // a freshly imported font always starts at its own 100%
-    state.fontPath = picked.path;
-    state.fontFamily = 'CustomUserFont';
-    state.customFonts = picked.customFonts;
-    render();
+  const importRow = buildRow('Import Font File…', {
+    iconName: 'plus',
+    onActivate: async () => {
+      const picked = await window.api.chooseFontPath();
+      if (!picked) return;
+      applyCustomFont(picked.path, 'CustomUserFont');
+      applyCustomFontScale(1); // a freshly imported font always starts at its own 100%
+      state.fontPath = picked.path;
+      state.fontFamily = 'CustomUserFont';
+      state.customFonts = picked.customFonts;
+      render();
+    },
   });
-
-  const resetRow = document.createElement('div');
-  resetRow.className = 'update-row';
-  resetRow.textContent = 'Reset to Default Font';
-  resetRow.addEventListener('click', async () => {
-    applyCustomFont(null, null);
-    applyCustomFontScale(1);
-    state.fontPath = null;
-    state.fontFamily = null;
-    await persistDisplaySettings();
-    render();
+  const resetRow = buildRow('Reset to Default Font', {
+    iconName: 'back',
+    onActivate: async () => {
+      applyCustomFont(null, null);
+      applyCustomFontScale(1);
+      state.fontPath = null;
+      state.fontFamily = null;
+      await persistDisplaySettings();
+      render();
+    },
   });
-
-  form.append(importRow, resetRow);
 
   // Every font ever imported stays listed here (stored in the app's own
   // data dir — see main.js's choose-font-path), so switching back to one
   // used before is a click on its row, not another trip through the file
   // browser to find that file again.
-  const fontListLabel = document.createElement('div');
-  fontListLabel.className = 'screen-subtitle';
-  fontListLabel.textContent = 'Imported Fonts';
-  fontListLabel.style.margin = '16px 0 0 10px';
-
-  // Windows font_path uses backslashes (path.join on the main-process
-  // side), so a plain endsWith('/'+fileName) would never match there —
-  // compare basenames on either separator instead.
   const activeFontFileName = baseName(state.fontPath);
-
-  const fontList = document.createElement('div');
-  fontList.className = 'timezone-list';
-  const fontRows = state.customFonts.map((font) => {
-    const isActive = font.fileName === activeFontFileName;
-    const activateFont = async () => {
+  const applyFontData = (data) => {
+    state.fontPath = data.fontPath;
+    state.fontFamily = data.fontFamily;
+    state.customFonts = data.customFonts;
+    render();
+  };
+  const fontRows = state.customFonts.map((font) => buildSelectableRow({
+    label: font.displayName,
+    isActive: font.fileName === activeFontFileName,
+    onActivate: async () => {
       const data = await window.api.selectFont(font.fileName);
       applyCustomFont(data.fontPath, data.fontFamily);
       applyCustomFontScale(font.scale || 1);
-      state.fontPath = data.fontPath;
-      state.fontFamily = data.fontFamily;
-      state.customFonts = data.customFonts;
-      render();
-    };
-    const removeFont = async () => {
+      applyFontData(data);
+    },
+    onRemove: async () => {
       const data = await window.api.removeFont(font.fileName);
       if (!data.fontPath) { applyCustomFont(null, null); applyCustomFontScale(1); }
-      state.fontPath = data.fontPath;
-      state.fontFamily = data.fontFamily;
-      state.customFonts = data.customFonts;
-      render();
-    };
-    const row = buildSelectableRow({ label: font.displayName, isActive, onActivate: activateFont, onRemove: removeFont });
-    fontList.appendChild(row.el);
-    return row;
-  });
-  if (!state.customFonts.length) {
-    const empty = document.createElement('div');
-    empty.className = 'game-list-empty';
-    empty.textContent = 'No fonts imported yet.';
-    fontList.appendChild(empty);
-  }
+      applyFontData(data);
+    },
+  }));
 
   // Only shown for an active custom font — the default UI font doesn't
-  // have this problem since every size in this app was tuned against it.
+  // need it since every size in this app was tuned against it.
   const activeFontEntry = state.customFonts.find((f) => f.fileName === activeFontFileName);
-  let scaleLabel = null;
   let scaleRow = null;
-  let scaleBtns = [];
   if (activeFontEntry) {
     const currentScale = activeFontEntry.scale || 1;
-    scaleLabel = document.createElement('div');
-    scaleLabel.className = 'screen-subtitle';
-    scaleLabel.textContent = `Font Scale — ${activeFontEntry.displayName} at ${Math.round(currentScale * 100)}%`;
-    scaleLabel.style.margin = '16px 0 0 10px';
-
-    scaleRow = document.createElement('div');
-    scaleRow.className = 'size-options';
-    const adjustScale = async (delta) => {
-      const newScale = Math.round(Math.max(0.7, Math.min(2, currentScale + delta)) * 10) / 10;
-      const data = await window.api.setFontScale({ fileName: activeFontEntry.fileName, scale: newScale });
-      applyCustomFontScale(newScale);
-      state.customFonts = data.customFonts;
-      render();
-    };
-    const minusBtn = document.createElement('div');
-    minusBtn.className = 'option-btn';
-    minusBtn.textContent = '− Smaller';
-    minusBtn.addEventListener('click', () => adjustScale(-0.1));
-    const plusBtn = document.createElement('div');
-    plusBtn.className = 'option-btn';
-    plusBtn.textContent = '+ Bigger';
-    plusBtn.addEventListener('click', () => adjustScale(0.1));
-    scaleRow.append(minusBtn, plusBtn);
-    scaleBtns = [minusBtn, plusBtn];
+    scaleRow = buildSliderRow('Font Scale', {
+      fraction: (currentScale - FONT_SCALE_MIN) / (FONT_SCALE_MAX - FONT_SCALE_MIN),
+      valueText: `${Math.round(currentScale * 100)}%`,
+      onAdjust: async (delta) => {
+        const newScale = Math.round(clamp(currentScale + delta * 0.1, FONT_SCALE_MIN, FONT_SCALE_MAX) * 10) / 10;
+        if (newScale === currentScale) return;
+        const data = await window.api.setFontScale({ fileName: activeFontEntry.fileName, scale: newScale });
+        applyCustomFontScale(newScale);
+        state.customFonts = data.customFonts;
+        render();
+      },
+    });
   }
 
-  const sizeLabel = document.createElement('div');
-  sizeLabel.className = 'screen-subtitle';
-  sizeLabel.textContent = `Text Size — currently ${state.fontSize[0].toUpperCase()}${state.fontSize.slice(1)}`;
-  sizeLabel.style.margin = '16px 0 0 10px';
-
-  const sizeRow = document.createElement('div');
-  sizeRow.className = 'size-options';
-  const sizeBtns = ['small', 'medium', 'large'].map((size) => {
-    const btn = document.createElement('div');
-    btn.className = 'option-btn' + (state.fontSize === size ? ' active' : '');
-    btn.textContent = size[0].toUpperCase() + size.slice(1);
-    btn.addEventListener('click', async () => {
-      applyFontSize(size);
-      state.fontSize = size;
+  const size = buildOptionGroup(['small', 'medium', 'large'].map((s) => ({
+    label: capitalize(s),
+    active: state.fontSize === s,
+    onActivate: async () => {
+      applyFontSize(s);
+      state.fontSize = s;
       await persistDisplaySettings();
       render();
-    });
-    sizeRow.appendChild(btn);
-    return btn;
-  });
+    },
+  })));
 
-  const goBack = () => { ui.screen = 'settings'; render(); };
-  const backBtn = document.createElement('div');
-  backBtn.className = 'detail-btn secondary';
-  backBtn.textContent = 'Back';
-  backBtn.addEventListener('click', goBack);
+  const back = buildBackButton(goBack);
+  content.append(buildList([importRow, resetRow]));
+  content.append(buildSectionLabel('Imported Fonts'), buildList(fontRows, { emptyText: 'No fonts imported yet.' }));
+  if (scaleRow) content.append(buildList([scaleRow]));
+  content.append(buildSectionLabel('Text Size'), size.el, back.el);
 
-  body.append(form, fontListLabel, fontList);
-  if (scaleLabel) body.append(scaleLabel, scaleRow);
-  body.append(sizeLabel, sizeRow, backBtn);
-  appEl.append(header, body);
-
-  // Small/Medium/Large (and, when shown, −/+ Font Scale) are each a
-  // horizontal group (Left/Right); everything else is its own row
-  // (Up/Down) — see createRowNav.
-  const rows = [
-    [{ el: importRow, activate: () => importRow.click() }],
-    [{ el: resetRow, activate: () => resetRow.click() }],
+  const nav = createRowNav([
+    [importRow],
+    [resetRow],
     ...fontRows.map((r) => [r]),
-    ...(scaleBtns.length ? [scaleBtns.map((b) => ({ el: b, activate: () => b.click() }))] : []),
-    sizeBtns.map((b) => ({ el: b, activate: () => b.click() })),
-    [{ el: backBtn, activate: goBack }],
-  ];
-  const nav = createRowNav(rows, { onEscape: goBack });
+    scaleRow ? [scaleRow] : [],
+    size.items,
+    [back],
+  ], { onEscape: goBack });
   currentKeyHandler = (e) => nav.handleKey(e);
-
-  setHints([{ key: '↑↓', label: 'Navigate' }, { key: '←→', label: 'Choose' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+  setHints(HINTS.form);
 }
 
 /* ---------- time settings ---------- */
 
 function renderTime(appEl) {
-  const header = buildHeader();
-  const body = document.createElement('div');
-  body.className = 'subscreen-body';
-  body.appendChild(buildScreenTitle('Time Setting'));
-  const subtitle = document.createElement('div');
-  subtitle.className = 'screen-subtitle';
-  subtitle.textContent = `Currently showing: ${state.timezone || 'System Default'} — ${formatClock(state.timezone)}`;
-  body.appendChild(subtitle);
+  const content = buildScreen(appEl, 'Time Setting', `Showing ${state.timezone || 'System Default'} — display only, your system clock is untouched.`);
+  const goBack = () => goTo('settings');
 
-  const formatRow = document.createElement('div');
-  formatRow.className = 'size-options';
-  const formatBtns = ['24h', '12h'].map((fmt) => {
-    const btn = document.createElement('div');
-    btn.className = 'option-btn' + (state.timeFormat === fmt ? ' active' : '');
-    btn.textContent = fmt === '24h' ? '24-hour' : '12-hour';
-    btn.addEventListener('click', async () => {
-      state.timeFormat = fmt;
-      await persistDisplaySettings();
-      render();
-    });
-    formatRow.appendChild(btn);
-    return btn;
-  });
+  const setAndSave = (patch) => async () => {
+    Object.assign(state, patch);
+    await persistDisplaySettings();
+    render();
+  };
 
-  const secondsLabel = document.createElement('div');
-  secondsLabel.className = 'screen-subtitle';
-  secondsLabel.textContent = 'Show Seconds';
-  secondsLabel.style.margin = '16px 0 0 10px';
+  const format = buildOptionGroup([
+    { label: '24-hour', active: state.timeFormat === '24h', onActivate: setAndSave({ timeFormat: '24h' }) },
+    { label: '12-hour', active: state.timeFormat === '12h', onActivate: setAndSave({ timeFormat: '12h' }) },
+  ]);
+  const seconds = buildOptionGroup([
+    { label: 'Off', active: !state.showSeconds, onActivate: setAndSave({ showSeconds: false }) },
+    { label: 'On', active: state.showSeconds, onActivate: setAndSave({ showSeconds: true }) },
+  ]);
 
-  const secondsRow = document.createElement('div');
-  secondsRow.className = 'size-options';
-  const secondsBtns = [['off', 'Off'], ['on', 'On']].map(([value, label]) => {
-    const btn = document.createElement('div');
-    const isActive = state.showSeconds === (value === 'on');
-    btn.className = 'option-btn' + (isActive ? ' active' : '');
-    btn.textContent = label;
-    btn.addEventListener('click', async () => {
-      state.showSeconds = value === 'on';
-      await persistDisplaySettings();
-      render();
-    });
-    secondsRow.appendChild(btn);
-    return btn;
-  });
-
-  const list = document.createElement('div');
-  list.className = 'timezone-list';
-  const zones = ['System Default', ...state.timezones];
   // Each row shows the option's own live clock plus how far it sits from
   // the zone that's actually applied right now (`state.timezone`), so
   // picking a zone is never a guess at what time it'll show.
-  const zoneRows = zones.map((tz) => {
+  const zoneRows = ['System Default', ...state.timezones].map((tz) => {
     const zoneValue = tz === 'System Default' ? null : tz;
     const isCurrent = zoneValue === state.timezone;
-    const row = document.createElement('div');
-    row.className = 'timezone-row' + (isCurrent ? ' active' : '');
-    const name = document.createElement('div');
-    name.className = 'timezone-row-name';
-    name.textContent = tz;
-    const clock = document.createElement('div');
-    clock.className = 'timezone-row-clock';
-    const diff = document.createElement('div');
-    diff.className = 'timezone-row-diff';
-    row.append(name, clock, diff);
-    function refreshRow() {
+    const row = el('div', 'list-row' + (isCurrent ? ' active' : ''));
+    const clock = el('div', 'list-row-clock');
+    const diff = el('div', 'list-row-meta');
+    row.append(el('div', 'list-row-name', tz), clock, diff);
+    const refresh = () => {
       clock.textContent = formatClock(zoneValue);
       diff.textContent = isCurrent ? 'Current' : zoneDiffLabel(zoneValue, state.timezone);
-    }
-    refreshRow();
-    row.addEventListener('click', async () => {
-      state.timezone = zoneValue;
-      await persistDisplaySettings();
-      render();
-    });
-    list.appendChild(row);
-    return { row, refreshRow };
+    };
+    refresh();
+    const activate = setAndSave({ timezone: zoneValue });
+    row.addEventListener('click', activate);
+    return { el: row, activate, refresh };
   });
-  screenInterval = setInterval(() => zoneRows.forEach((r) => r.refreshRow()), 1000);
+  screenInterval = setInterval(() => zoneRows.forEach((r) => r.refresh()), 1000);
 
-  const goBack = () => { ui.screen = 'settings'; render(); };
-  const backBtn = document.createElement('div');
-  backBtn.className = 'detail-btn secondary';
-  backBtn.textContent = 'Back';
-  backBtn.addEventListener('click', goBack);
+  const back = buildBackButton(goBack);
+  content.append(
+    buildSectionLabel('Clock Format'), format.el,
+    buildSectionLabel('Show Seconds'), seconds.el,
+    buildSectionLabel('Time Zone'), buildList(zoneRows, { scroll: true }),
+    back.el,
+  );
 
-  body.append(formatRow, secondsLabel, secondsRow, list, backBtn);
-  appEl.append(header, body);
-
-  // 24-hour/12-hour and Off/On are each a horizontal pair (Left/Right);
-  // everything else is its own row (Up/Down) — see createRowNav.
-  const rows = [
-    formatBtns.map((b) => ({ el: b, activate: () => b.click() })),
-    secondsBtns.map((b) => ({ el: b, activate: () => b.click() })),
-    ...zoneRows.map((r) => [{ el: r.row, activate: () => r.row.click() }]),
-    [{ el: backBtn, activate: goBack }],
-  ];
-  const nav = createRowNav(rows, { onEscape: goBack });
+  const nav = createRowNav([format.items, seconds.items, ...zoneRows.map((r) => [r]), [back]], { onEscape: goBack });
   currentKeyHandler = (e) => nav.handleKey(e);
-
-  setHints([{ key: '↑↓', label: 'Navigate' }, { key: '←→', label: 'Choose' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+  setHints(HINTS.form);
 }
 
 /* ---------- background music ---------- */
 
 function renderMusic(appEl) {
-  const header = buildHeader();
-  const body = document.createElement('div');
-  body.className = 'subscreen-body';
-  body.appendChild(buildScreenTitle('Background Music'));
+  const content = buildScreen(appEl, 'Background Music', state.musicPath
+    ? 'Plays in the menu and pauses while a game is running.'
+    : 'No music set — it plays in the menu and pauses while a game is running.');
+  const goBack = () => goTo('settings');
 
-  const subtitle = document.createElement('div');
-  subtitle.className = 'screen-subtitle';
-  subtitle.textContent = state.musicPath
-    ? 'It plays in the menu and pauses while a game is running.'
-    : 'No music set — it plays in the menu and pauses while a game is running.';
-  body.appendChild(subtitle);
-
-  const form = document.createElement('div');
-  form.className = 'update-form';
-
-  const importRow = document.createElement('div');
-  importRow.className = 'update-row';
-  importRow.textContent = 'Import Music File…';
-  importRow.addEventListener('click', async () => {
-    const previousPath = state.musicPath;
-    const data = await window.api.chooseMusicPath();
-    state.musicPath = data.musicPath;
-    state.customMusic = data.customMusic;
-    // Cancelling the file picker returns the same musicPath unchanged —
-    // skip reapplying it, or the already-playing track would restart
-    // from 0 for no reason.
-    if (state.musicPath !== previousPath) {
-      applyMusicSource(state.musicPath);
-      playBackgroundMusic();
-    }
-    render();
+  const importRow = buildRow('Import Music File…', {
+    iconName: 'plus',
+    onActivate: async () => {
+      const previousPath = state.musicPath;
+      const data = await window.api.chooseMusicPath();
+      state.musicPath = data.musicPath;
+      state.customMusic = data.customMusic;
+      // Cancelling the file picker returns the same musicPath unchanged —
+      // skip reapplying it, or the already-playing track would restart
+      // from 0 for no reason.
+      if (state.musicPath !== previousPath) {
+        applyMusicSource(state.musicPath);
+        playBackgroundMusic();
+      }
+      render();
+    },
   });
-  form.append(importRow);
 
   // Every track ever imported stays listed here (stored in the app's own
   // data dir — see main.js's choose-music-path), so switching back to one
-  // used before is a click on its row, not another trip through the file
-  // browser to find that file again.
-  const trackListLabel = document.createElement('div');
-  trackListLabel.className = 'screen-subtitle';
-  trackListLabel.textContent = 'Imported Tracks';
-  trackListLabel.style.margin = '16px 0 0 10px';
-
-  // Windows music_path uses backslashes (path.join on the main-process
-  // side), so a plain endsWith('/'+fileName) would never match there —
-  // compare basenames on either separator instead.
+  // used before is a click on its row.
   const activeFileName = baseName(state.musicPath);
-
-  const trackList = document.createElement('div');
-  trackList.className = 'timezone-list';
   const trackRows = state.customMusic.map((track) => {
     const isActive = track.fileName === activeFileName;
-    const activateTrack = async () => {
-      if (isActive) return; // already playing this one — don't restart it from 0
-      const data = await window.api.selectMusic(track.fileName);
-      state.musicPath = data.musicPath;
-      applyMusicSource(state.musicPath);
-      playBackgroundMusic();
-      render();
-    };
-    const removeTrack = async () => {
-      const data = await window.api.removeMusic(track.fileName);
-      state.musicPath = data.musicPath;
-      state.customMusic = data.customMusic;
-      if (isActive) { pauseBackgroundMusic(); applyMusicSource(null); }
-      render();
-    };
-    const row = buildSelectableRow({ label: track.displayName, isActive, onActivate: activateTrack, onRemove: removeTrack });
-    trackList.appendChild(row.el);
-    return row;
+    return buildSelectableRow({
+      label: track.displayName,
+      isActive,
+      onActivate: async () => {
+        if (isActive) return; // already playing this one — don't restart it from 0
+        const data = await window.api.selectMusic(track.fileName);
+        state.musicPath = data.musicPath;
+        applyMusicSource(state.musicPath);
+        playBackgroundMusic();
+        render();
+      },
+      onRemove: async () => {
+        const data = await window.api.removeMusic(track.fileName);
+        state.musicPath = data.musicPath;
+        state.customMusic = data.customMusic;
+        if (isActive) { pauseBackgroundMusic(); applyMusicSource(null); }
+        render();
+      },
+    });
   });
-  if (!state.customMusic.length) {
-    const empty = document.createElement('div');
-    empty.className = 'game-list-empty';
-    empty.textContent = 'No music imported yet.';
-    trackList.appendChild(empty);
-  }
 
-  const volumeLabel = document.createElement('div');
-  volumeLabel.className = 'screen-subtitle';
-  volumeLabel.textContent = state.musicMuted
-    ? `Volume — Muted (${Math.round(state.musicVolume * 100)}% when unmuted)`
-    : `Volume — ${Math.round(state.musicVolume * 100)}%`;
-  volumeLabel.style.margin = '16px 0 0 10px';
-
-  const volumeRow = document.createElement('div');
-  volumeRow.className = 'size-options';
-  const adjustVolume = async (delta) => {
-    const newVolume = Math.round(Math.max(0, Math.min(1, state.musicVolume + delta)) * 20) / 20;
-    const data = await window.api.setMusicVolume(newVolume);
-    state.musicVolume = data.musicVolume;
-    applyMusicVolume();
-    render();
-  };
-  const quieterBtn = document.createElement('div');
-  quieterBtn.className = 'option-btn';
-  quieterBtn.textContent = '− Quieter';
-  quieterBtn.addEventListener('click', () => adjustVolume(-0.05));
-  const louderBtn = document.createElement('div');
-  louderBtn.className = 'option-btn';
-  louderBtn.textContent = '+ Louder';
-  louderBtn.addEventListener('click', () => adjustVolume(0.05));
-  volumeRow.append(quieterBtn, louderBtn);
+  const volumePct = Math.round(state.musicVolume * 100);
+  const volumeRow = buildSliderRow('Volume', {
+    fraction: state.musicVolume,
+    valueText: state.musicMuted ? 'Muted' : `${volumePct}%`,
+    onAdjust: async (delta) => {
+      const newVolume = Math.round(clamp(state.musicVolume + delta * 0.05, 0, 1) * 20) / 20;
+      if (newVolume === state.musicVolume) return;
+      const data = await window.api.setMusicVolume(newVolume);
+      state.musicVolume = data.musicVolume;
+      applyMusicVolume();
+      render();
+    },
+  });
+  if (state.musicMuted) volumeRow.el.classList.add('muted');
 
   // A dedicated toggle rather than just "turn Volume down to 0%" — muting
   // this way remembers the volume you had, so unmuting doesn't come back
   // silent or force you to re-pick a level.
-  const muteRow = document.createElement('div');
-  muteRow.className = 'update-row';
-  muteRow.textContent = state.musicMuted ? 'Unmute' : 'Mute';
-  muteRow.addEventListener('click', async () => {
-    const data = await window.api.setMusicMuted(!state.musicMuted);
-    state.musicMuted = data.musicMuted;
-    applyMusicVolume();
-    render();
+  const muteRow = buildRow(state.musicMuted ? 'Unmute' : 'Mute', {
+    iconName: 'volume',
+    value: state.musicMuted ? `Back to ${volumePct}%` : undefined,
+    onActivate: async () => {
+      const data = await window.api.setMusicMuted(!state.musicMuted);
+      state.musicMuted = data.musicMuted;
+      applyMusicVolume();
+      render();
+    },
   });
 
-  const goBack = () => { ui.screen = 'settings'; render(); };
-  const backBtn = document.createElement('div');
-  backBtn.className = 'detail-btn secondary';
-  backBtn.textContent = 'Back';
-  backBtn.addEventListener('click', goBack);
+  const back = buildBackButton(goBack);
+  content.append(
+    buildList([importRow]),
+    buildSectionLabel('Imported Tracks'), buildList(trackRows, { emptyText: 'No music imported yet.' }),
+    buildSectionLabel('Playback'), buildList([volumeRow, muteRow]),
+    back.el,
+  );
 
-  body.append(form, trackListLabel, trackList, volumeLabel, volumeRow, muteRow, backBtn);
-  appEl.append(header, body);
-
-  const rows = [
-    [{ el: importRow, activate: () => importRow.click() }],
-    ...trackRows.map((r) => [r]),
-    [{ el: quieterBtn, activate: () => quieterBtn.click() }, { el: louderBtn, activate: () => louderBtn.click() }],
-    [{ el: muteRow, activate: () => muteRow.click() }],
-    [{ el: backBtn, activate: goBack }],
-  ];
-  const nav = createRowNav(rows, { onEscape: goBack });
+  const nav = createRowNav([[importRow], ...trackRows.map((r) => [r]), [volumeRow], [muteRow], [back]], { onEscape: goBack });
   currentKeyHandler = (e) => nav.handleKey(e);
-
-  setHints([{ key: '↑↓', label: 'Navigate' }, { key: '←→', label: 'Choose' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+  setHints(HINTS.form);
 }
 
 /* ---------- menu (nav) sounds ---------- */
@@ -2112,265 +1903,138 @@ function renderMusic(appEl) {
 const UI_SOUND_LABELS = { move: 'Move', confirm: 'Confirm', back: 'Back' };
 
 function renderUiSounds(appEl) {
-  const header = buildHeader();
-  const body = document.createElement('div');
-  body.className = 'subscreen-body';
-  body.appendChild(buildScreenTitle('Menu Sounds'));
-
-  const subtitle = document.createElement('div');
-  subtitle.className = 'screen-subtitle';
-  subtitle.textContent = 'Played moving around this menu — import your own sound for any category, or pick Default for the built-in tone. Selecting a row plays it so you can hear it.';
-  body.appendChild(subtitle);
-
+  const content = buildScreen(appEl, 'Menu Sounds', 'Import your own sound for any category, or pick Default for the built-in tone. Selecting a row plays it.');
+  const goBack = () => goTo('settings');
   const rows = [];
 
   ['move', 'confirm', 'back'].forEach((kind) => {
-    const sectionLabel = document.createElement('div');
-    sectionLabel.className = 'screen-subtitle';
-    sectionLabel.textContent = `${UI_SOUND_LABELS[kind]} Sound`;
-    sectionLabel.style.margin = '16px 0 0 10px';
-    body.appendChild(sectionLabel);
-
-    const form = document.createElement('div');
-    form.className = 'update-form';
-    const importRow = document.createElement('div');
-    importRow.className = 'update-row';
-    importRow.textContent = 'Import Custom Sound…';
-    importRow.addEventListener('click', async () => {
-      const data = await window.api.chooseUiSound(kind);
+    const applySoundData = (data) => {
       state.uiSounds = data.uiSounds;
-      state.customUiSounds = data.customUiSounds;
+      if (data.customUiSounds) state.customUiSounds = data.customUiSounds;
       resetCustomUiSound(kind);
-      previewUiSound(kind);
-      render();
+    };
+    const importRow = buildRow('Import Custom Sound…', {
+      iconName: 'plus',
+      onActivate: async () => {
+        applySoundData(await window.api.chooseUiSound(kind));
+        previewUiSound(kind);
+        render();
+      },
     });
-    form.append(importRow);
-    body.appendChild(form);
-    rows.push([{ el: importRow, activate: () => importRow.click() }]);
-
-    const activeFileName = baseName(state.uiSounds[kind]);
-
-    const list = document.createElement('div');
-    list.className = 'timezone-list';
 
     // A synthetic first entry standing in for "no custom file" — folds
     // reverting to the built-in tone into the same select-from-a-list
-    // interaction as every real imported sound below it, instead of a
-    // separate reset control.
-    const isDefaultActive = !activeFileName;
-    const activateDefault = async () => {
-      if (isDefaultActive) { previewUiSound(kind); return; }
-      const data = await window.api.clearUiSound(kind);
-      state.uiSounds = data.uiSounds;
-      resetCustomUiSound(kind);
-      previewUiSound(kind);
-      render();
-    };
-    const defaultRow = buildSelectableRow({ label: 'Default (Built-in)', isActive: isDefaultActive, onActivate: activateDefault });
-    list.appendChild(defaultRow.el);
-    rows.push([defaultRow]);
-
-    state.customUiSounds[kind].forEach((sound) => {
-      const isActive = sound.fileName === activeFileName;
-      const activateSound = async () => {
-        if (isActive) { previewUiSound(kind); return; }
-        const data = await window.api.selectUiSound(kind, sound.fileName);
-        state.uiSounds = data.uiSounds;
-        resetCustomUiSound(kind);
+    // interaction as every real imported sound below it.
+    const activeFileName = baseName(state.uiSounds[kind]);
+    const defaultRow = buildSelectableRow({
+      label: 'Default (Built-in)',
+      isActive: !activeFileName,
+      onActivate: async () => {
+        if (activeFileName) { applySoundData(await window.api.clearUiSound(kind)); render(); }
         previewUiSound(kind);
-        render();
-      };
-      const removeSound = async () => {
-        const data = await window.api.removeUiSound(kind, sound.fileName);
-        state.uiSounds = data.uiSounds;
-        state.customUiSounds = data.customUiSounds;
-        if (isActive) resetCustomUiSound(kind);
-        render();
-      };
-      const row = buildSelectableRow({ label: sound.displayName, isActive, onActivate: activateSound, onRemove: removeSound });
-      list.appendChild(row.el);
-      rows.push([row]);
+      },
+    });
+    const soundRows = state.customUiSounds[kind].map((sound) => {
+      const isActive = sound.fileName === activeFileName;
+      return buildSelectableRow({
+        label: sound.displayName,
+        isActive,
+        onActivate: async () => {
+          if (!isActive) { applySoundData(await window.api.selectUiSound(kind, sound.fileName)); render(); }
+          previewUiSound(kind);
+        },
+        onRemove: async () => {
+          applySoundData(await window.api.removeUiSound(kind, sound.fileName));
+          render();
+        },
+      });
     });
 
-    if (!state.customUiSounds[kind].length) {
-      const empty = document.createElement('div');
-      empty.className = 'game-list-empty';
-      empty.textContent = 'No custom sounds imported yet.';
-      list.appendChild(empty);
-    }
-
-    body.appendChild(list);
+    content.append(buildSectionLabel(`${UI_SOUND_LABELS[kind]} Sound`), buildList([importRow, defaultRow, ...soundRows]));
+    rows.push([importRow], [defaultRow], ...soundRows.map((r) => [r]));
   });
 
-  const goBack = () => { ui.screen = 'settings'; render(); };
-  const backBtn = document.createElement('div');
-  backBtn.className = 'detail-btn secondary';
-  backBtn.textContent = 'Back';
-  backBtn.addEventListener('click', goBack);
-  body.appendChild(backBtn);
-  rows.push([{ el: backBtn, activate: goBack }]);
-
-  appEl.append(header, body);
+  const back = buildBackButton(goBack);
+  content.appendChild(back.el);
+  rows.push([back]);
 
   const nav = createRowNav(rows, { onEscape: goBack });
   currentKeyHandler = (e) => nav.handleKey(e);
-
-  setHints([{ key: '↑↓', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+  setHints(HINTS.list);
 }
 
 /* ---------- menu color ---------- */
 
-// A tile grid of preset accent swatches, styled like every other tile
-// grid in the app (tile-wrap/tile-surface/bubble) instead of a bespoke
-// look — reusing that language is what makes this screen feel consistent
-// with Settings/Add Game rather than like a separate color-tool bolted on.
-function buildColorGrid(entries, onActivate, activeHex, activeMode) {
-  const outer = document.createElement('div');
-  outer.className = 'settings-grid-outer';
-  const grid = document.createElement('div');
-  grid.className = 'settings-grid';
-  const items = [];
-  entries.forEach((entry) => {
-    const wrap = document.createElement('div');
-    wrap.className = 'tile-wrap';
-    const anchor = document.createElement('div');
-    anchor.className = 'tile-anchor';
-    const surface = document.createElement('div');
-    surface.className = 'tile-surface';
-
-    if (entry.kind === 'swatch') {
-      surface.style.background = entry.hex;
-      if (entry.hex.toLowerCase() === activeHex.toLowerCase()) {
-        const check = document.createElement('span');
-        check.className = 'color-swatch-check';
-        check.style.color = Theme.readableFg(entry.hex);
-        check.textContent = '✓';
-        surface.appendChild(check);
-      }
-    } else if (entry.kind === 'mode') {
-      const span = document.createElement('span');
-      span.className = 'letter';
-      span.textContent = entry.mode === 'light' ? '☀️' : '🌙';
-      surface.appendChild(span);
-      if (entry.mode === activeMode) {
-        const check = document.createElement('span');
-        // Not .color-swatch-check: this tile's background is --tile
-        // (near-white in Light Mode), not an arbitrary hex, so it just
-        // reuses the existing --tile-fg variable instead of computing
-        // readableFg itself.
-        check.className = 'mode-tile-check';
-        check.textContent = '✓';
-        surface.appendChild(check);
-      }
-    } else {
-      const span = document.createElement('span');
-      span.className = 'letter';
-      span.textContent = entry.kind === 'custom' ? '🎨' : '←';
-      surface.appendChild(span);
-    }
-    anchor.appendChild(surface);
-
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    const nameEl = document.createElement('div');
-    nameEl.className = 'bubble-name';
-    nameEl.textContent = entry.name;
-    const actionEl = document.createElement('div');
-    actionEl.className = 'bubble-action';
-    actionEl.textContent = entry.kind === 'back' ? 'Back' : 'Select';
-    bubble.append(nameEl, actionEl);
-    anchor.appendChild(bubble);
-
-    wrap.appendChild(anchor);
-    wrap.addEventListener('click', () => onActivate(entry));
-    grid.appendChild(wrap);
-    items.push({ el: wrap, activate: () => onActivate(entry) });
-  });
-  outer.appendChild(grid);
-  return { gridEl: outer, items };
+function colorTileArt(entry) {
+  if (entry.kind === 'swatch') {
+    const swatch = el('span', 'swatch');
+    swatch.style.background = entry.hex;
+    return swatch;
+  }
+  if (entry.kind === 'mode') return iconNode(entry.mode === 'light' ? 'sun' : 'moon', 'tile-icon');
+  return tileArt(entry);
 }
 
 // R/G/B fine-tuning for a single accent color, for when none of the
-// presets are quite right — same slider mechanics the old 3-tab screen
-// used, just scoped to one color instead of three independent ones.
+// presets are quite right.
 function showCustomColorModal(initialHex) {
   return openModal((modal, close) => {
-    const h = document.createElement('h3');
-    h.textContent = 'Custom Accent Color';
-    const preview = document.createElement('div');
-    preview.className = 'color-preview';
-    const rowsWrap = document.createElement('div');
-    rowsWrap.className = 'color-rows';
+    const preview = el('div', 'color-preview');
+    const rowsWrap = el('div', 'color-rows');
     const values = Theme.hexToRgb(initialHex);
     let rowIndex = 0;
 
     const rowEls = ['Red', 'Green', 'Blue'].map((label, i) => {
-      const row = document.createElement('div');
-      row.className = 'color-row';
-      const lbl = document.createElement('div');
-      lbl.className = 'color-row-label';
-      lbl.textContent = label;
-      const bar = document.createElement('div');
-      bar.className = 'color-bar';
-      const fill = document.createElement('div');
-      fill.className = 'color-bar-fill';
+      const row = el('div', 'color-row');
+      const bar = el('div', 'slider');
+      const fill = el('div', `slider-fill channel-${i}`);
       bar.appendChild(fill);
-      const value = document.createElement('div');
-      value.className = 'color-row-value';
-      row.append(lbl, bar, value);
+      const value = el('div', 'color-row-value');
+      row.append(el('div', 'color-row-label', label), bar, value);
       rowsWrap.appendChild(row);
 
       row.addEventListener('click', () => { rowIndex = i; refresh(); });
       function setFromEvent(e) {
         const rect = bar.getBoundingClientRect();
-        const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+        const x = clamp(e.clientX - rect.left, 0, rect.width);
         rowIndex = i;
         values[i] = Math.round((x / rect.width) * 255);
         refresh();
       }
       bar.addEventListener('mousedown', (e) => {
         setFromEvent(e);
-        const onMove = (ev) => setFromEvent(ev);
         const onUp = () => {
-          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mousemove', setFromEvent);
           window.removeEventListener('mouseup', onUp);
         };
-        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mousemove', setFromEvent);
         window.addEventListener('mouseup', onUp);
       });
       return { row, fill, value };
     });
 
-    const buttons = document.createElement('div');
-    buttons.className = 'modal-buttons';
-    const cancelBtn = document.createElement('button');
-    cancelBtn.textContent = 'Cancel';
-    cancelBtn.className = 'secondary';
-    const okBtn = document.createElement('button');
-    okBtn.textContent = 'Apply';
-    okBtn.className = 'primary';
-    buttons.append(cancelBtn, okBtn);
-    modal.append(h, preview, rowsWrap, buttons);
+    const okBtn = modalButton('Apply', true, () => close(Theme.rgbToHex(values)));
+    const buttons = el('div', 'modal-buttons');
+    buttons.append(modalButton('Cancel', false, () => close(null)), okBtn);
+    modal.append(el('h3', null, 'Custom Accent Color'), preview, rowsWrap, buttons);
 
     function refresh() {
       preview.style.background = Theme.rgbToHex(values);
       rowEls.forEach((r, i) => {
         r.value.textContent = String(values[i]);
         r.fill.style.width = `${(values[i] / 255) * 100}%`;
-        r.row.classList.toggle('focused', rowIndex === i);
+        r.row.classList.toggle('kbd-focus', rowIndex === i);
       });
     }
     refresh();
 
-    cancelBtn.onclick = () => close(null);
-    okBtn.onclick = () => close(Theme.rgbToHex(values));
     modal.parentElement.addEventListener('keydown', (e) => {
-      if (e.key === 'ArrowUp') { rowIndex = (rowIndex - 1 + 3) % 3; refresh(); e.preventDefault(); }
-      else if (e.key === 'ArrowDown') { rowIndex = (rowIndex + 1) % 3; refresh(); e.preventDefault(); }
+      if (e.key === 'ArrowUp') { rowIndex = (rowIndex + 2) % 3; playUiSound('move'); refresh(); e.preventDefault(); }
+      else if (e.key === 'ArrowDown') { rowIndex = (rowIndex + 1) % 3; playUiSound('move'); refresh(); e.preventDefault(); }
       else if (e.key === 'ArrowLeft') { values[rowIndex] = Math.max(0, values[rowIndex] - 8); refresh(); e.preventDefault(); }
       else if (e.key === 'ArrowRight') { values[rowIndex] = Math.min(255, values[rowIndex] + 8); refresh(); e.preventDefault(); }
-      else if (e.key === 'Enter') { close(Theme.rgbToHex(values)); e.preventDefault(); }
-      else if (e.key === 'Escape') { close(null); e.preventDefault(); }
+      else if (e.key === 'Enter') { playUiSound('confirm'); close(Theme.rgbToHex(values)); e.preventDefault(); }
+      else if (e.key === 'Escape') { playUiSound('back'); close(null); e.preventDefault(); }
     });
     // Without giving something in the modal real DOM focus, document.activeElement
     // stays on <body> — every keydown (real keyboard AND the gamepad code's
@@ -2382,43 +2046,25 @@ function showCustomColorModal(initialHex) {
 }
 
 function renderColor(appEl) {
-  const header = buildHeader();
-  const body = document.createElement('div');
-  body.className = 'subscreen-body';
-  body.appendChild(buildScreenTitle('Menu Color'));
-  const subtitle = document.createElement('div');
-  subtitle.className = 'screen-subtitle';
-  subtitle.textContent = `Accent: ${state.themeColor}, ${state.themeMode === 'light' ? 'Light' : 'Dark'} mode — everything else matches automatically.`;
-  body.appendChild(subtitle);
+  const content = buildScreen(appEl, 'Menu Color', `Accent ${state.themeColor.toUpperCase()} · ${capitalize(state.themeMode)} mode — everything else matches automatically.`);
+  const goBack = () => goTo('settings');
 
-  async function applyAccent(hex) {
-    await window.api.saveSettings({ themeColor: hex, themeMode: state.themeMode });
-    state.themeColor = hex;
-    state.theme = Theme.computeTheme(hex, state.themeMode);
-    applyTheme();
-    render();
-  }
-
-  async function applyMode(mode) {
-    await window.api.saveSettings({ themeColor: state.themeColor, themeMode: mode });
-    state.themeMode = mode;
-    state.theme = Theme.computeTheme(state.themeColor, mode);
+  async function applyTheming(themeColor, themeMode) {
+    await window.api.saveSettings({ themeColor, themeMode });
+    state.themeColor = themeColor;
+    state.themeMode = themeMode;
+    state.theme = Theme.computeTheme(themeColor, themeMode);
     applyTheme();
     render();
   }
 
   async function activateColorEntry(entry) {
-    if (entry.kind === 'swatch') {
-      await applyAccent(entry.hex);
-    } else if (entry.kind === 'mode') {
-      await applyMode(entry.mode);
-    } else if (entry.kind === 'custom') {
+    if (entry.kind === 'swatch') await applyTheming(entry.hex, state.themeMode);
+    else if (entry.kind === 'mode') await applyTheming(state.themeColor, entry.mode);
+    else if (entry.kind === 'custom') {
       const hex = await showCustomColorModal(state.themeColor);
-      if (hex) await applyAccent(hex);
-    } else if (entry.kind === 'back') {
-      ui.screen = 'settings';
-      render();
-    }
+      if (hex) await applyTheming(hex, state.themeMode);
+    } else if (entry.kind === 'back') goBack();
   }
 
   const entries = [
@@ -2429,40 +2075,32 @@ function renderColor(appEl) {
     { kind: 'back', name: 'Back' },
   ];
 
-  const { gridEl, items } = buildColorGrid(entries, activateColorEntry, state.themeColor, state.themeMode);
-  body.appendChild(gridEl);
-  appEl.append(header, body);
+  const { el: gridEl, items } = buildTileCollection(entries, activateColorEntry, {
+    tileOptions: (entry) => ({
+      art: colorTileArt(entry),
+      action: entry.kind === 'back' ? 'Back' : 'Select',
+      active: (entry.kind === 'swatch' && entry.hex.toLowerCase() === state.themeColor.toLowerCase())
+        || (entry.kind === 'mode' && entry.mode === state.themeMode),
+    }),
+  });
+  content.appendChild(gridEl);
 
-  const goBack = () => { ui.screen = 'settings'; render(); };
   const nav = create2DNav(items, countGridColumns(items), { onEscape: goBack });
   currentKeyHandler = (e) => nav.handleKey(e);
-
-  setHints([{ key: '↑↓←→', label: 'Navigate' }, { key: 'Enter', label: 'Select' }, { key: 'Esc', label: 'Back' }]);
+  setHints(HINTS.grid);
 }
 
 /* ---------- init ---------- */
 
+const STATE_KEYS = [
+  'apps', 'user', 'themeColor', 'themeMode', 'fontPath', 'fontFamily', 'fontSize', 'customFonts',
+  'timezone', 'timeFormat', 'timezones', 'showSeconds', 'musicPath', 'musicVolume', 'musicMuted',
+  'customMusic', 'uiSounds', 'customUiSounds',
+];
+
 async function init() {
   const data = await window.api.getState();
-  state.apps = data.apps;
-  state.user = data.user;
-  state.themeColor = data.themeColor;
-  state.themeMode = data.themeMode;
-  state.assetsDir = data.assetsDir;
-  state.fontPath = data.fontPath;
-  state.fontFamily = data.fontFamily;
-  state.fontSize = data.fontSize;
-  state.customFonts = data.customFonts;
-  state.timezone = data.timezone;
-  state.timeFormat = data.timeFormat;
-  state.timezones = data.timezones;
-  state.showSeconds = data.showSeconds;
-  state.musicPath = data.musicPath;
-  state.musicVolume = data.musicVolume;
-  state.musicMuted = data.musicMuted;
-  state.customMusic = data.customMusic;
-  state.uiSounds = data.uiSounds;
-  state.customUiSounds = data.customUiSounds;
+  for (const key of STATE_KEYS) state[key] = data[key];
   state.theme = Theme.computeTheme(state.themeColor, state.themeMode);
   applyTheme();
   if (state.fontPath && state.fontFamily) {
@@ -2475,7 +2113,7 @@ async function init() {
 
   window.api.onAppsUpdated((apps) => {
     state.apps = apps;
-    if (ui.screen === 'menu' || ui.screen === 'detail') render();
+    if (ui.screen === 'menu') render();
   });
   window.api.onGameExited(() => playBackgroundMusic());
 
